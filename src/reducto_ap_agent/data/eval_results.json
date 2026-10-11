@@ -64,6 +64,12 @@
     "state_split_sums": true,
     "tie_break_named": true
   },
+  "supplier_ledger": {
+    "totals_tie_to_position": true,
+    "unmatched_listed_nowhere_else": true,
+    "story_complete": true,
+    "bank_warning_matches_master": true
+  },
   "failures": [],
   "gates": {
     "match_decision_accuracy == 1.0": true,
@@ -91,7 +97,11 @@
     "position_undated_named": true,
     "position_ties_to_packet": true,
     "position_state_split_sums": true,
-    "position_tie_break_named": true
+    "position_tie_break_named": true,
+    "ledger_totals_tie_to_position": true,
+    "ledger_unmatched_listed_nowhere_else": true,
+    "ledger_story_complete": true,
+    "ledger_bank_warning_matches_master": true
   },
   "gate_passed": true
 }

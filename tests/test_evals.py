@@ -58,3 +58,8 @@ def test_eval_gates_pass_on_the_golden_world():
     assert position["tie_holds"]
     assert position["state_split_sums"]
     assert position["tie_break_named"]
+    ledger = results["supplier_ledger"]
+    assert ledger["totals_tie_to_position"]
+    assert ledger["unmatched_listed_nowhere_else"]
+    assert ledger["story_complete"]
+    assert ledger["bank_warning_matches_master"]

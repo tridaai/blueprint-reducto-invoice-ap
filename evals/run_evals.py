@@ -58,6 +58,18 @@ Gates (a failure exits non-zero):
   exceeding its invoice's face, which application refuses in
   code — breaks the tie by name (POSITION_TIE_BREAK) with
   both figures.
+- supplier ledger — one supplier's whole relationship as a
+  read model over the main service's end state: Harborlight's
+  totals (face, credits, open) tie to its position row to the
+  cent, and every supplier's ledger ties; a stray invoice
+  from a supplier spelling the master has never seen lands
+  under Unmatched — counted, named as written, and present
+  on no supplier's ledger; Harborlight's story renders whole
+  (a fully credited invoice with its credit, a paid-proposed
+  member the bank answered MISSING, a waiting credit with its
+  reason, four open statement breaks); and the bank warning
+  is present exactly where a document disagreed with the
+  master — Granite Peak — and nowhere else.
 
 Reported, not gated: per-field extraction accuracy, review-queue
 precision. A live run (EVAL_LIVE=1, DOCUMENT_BACKEND=reducto,
@@ -75,7 +87,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from reducto_ap_agent.datasets import build_world, remittance_advice_doc  # noqa: E402
+from reducto_ap_agent.datasets import _doc, build_world, remittance_advice_doc  # noqa: E402
 from reducto_ap_agent.errors import GateError  # noqa: E402
 from reducto_ap_agent.graph import ApPipeline  # noqa: E402
 from reducto_ap_agent.object_store import InMemoryObjectStore  # noqa: E402
@@ -85,6 +97,7 @@ from reducto_ap_agent.schemas import (  # noqa: E402
     DocumentRecord,
     ExtractedDocument,
     ExtractedField,
+    LineItem,
 )
 from reducto_ap_agent.service import ApService  # noqa: E402
 from reducto_ap_agent.store import InMemoryRecordStore  # noqa: E402
@@ -547,6 +560,107 @@ def evaluate(service: ApService) -> dict:
         "export_net": export_net,
     }
 
+    # -- supplier ledger ---------------------------------------
+    # Harborlight's whole relationship, over the main service's
+    # end state: three approved invoices — one released in the
+    # batch, one released in the confirmation run and answered
+    # MISSING, one fully covered by CN-2003 — a second credit
+    # still waiting, and the statement whose four breaks no
+    # controller has accepted. Plus one stray document from a
+    # spelling the master has never seen.
+    stray_text = _doc("INVOICE", 1, [
+        ("Supplier", "Harbor Light Marine Supply"),
+        ("Invoice Number", "INV-2099"),
+        ("Invoice Date", "2026-09-14"),
+        ("Due Date", "2026-10-14"),
+        ("PO Reference", "PO-9998"),
+        ("Currency", "USD"),
+        ("Bank Account", "US00 HARB 6666 7777 8888"),
+        ("Subtotal", "150.00"), ("Tax", "0.00"), ("Total", "150.00"),
+    ], [LineItem(sku="SKU-N9", description="Mooring line", quantity=1,
+                 unit_price=150.00, amount=150.00)])
+    (stray,) = service.submit(
+        "SUB-EVAL-STRAY", "sub-eval-stray.pdf",
+        stray_text.encode("utf-8"), "text/plain",
+    )
+    harbor_ledger = service.supplier_ledger("SUP-08", "2026-11-15")
+    ledger_index = service.supplier_index("2026-11-15")
+    position_rows = {
+        (row.supplier_id, row.currency): row
+        for row in service.ap_position("2026-11-15").suppliers
+    }
+    (harbor_usd,) = harbor_ledger.totals
+    ledger_ties = (
+        harbor_ledger.tie_status == "TIED"
+        and (harbor_usd.face_total, harbor_usd.credits_total,
+             harbor_usd.open_total) == (1500.00, 200.00, 1300.00)
+        and harbor_usd.position_open_total
+        == position_rows[("SUP-08", "USD")].open_total == 1300.00
+        and all(
+            totals.tied
+            for entry in ledger_index.suppliers
+            for totals in service.supplier_ledger(
+                entry.supplier_id, "2026-11-15").totals
+        )
+    )
+    stray_unmatched = (
+        stray.supplier_id is None
+        and ledger_index.unmatched_count == 1
+        and ledger_index.unmatched[0].record_id == stray.record_id
+        and ledger_index.unmatched[0].name_as_written
+        == "Harbor Light Marine Supply"
+        and all(
+            stray.record_id not in [
+                d.record_id
+                for d in service.supplier_ledger(
+                    entry.supplier_id, "2026-11-15").documents
+            ]
+            for entry in ledger_index.suppliers
+        )
+    )
+    harbor_invoices = {i.invoice_number: i for i in harbor_ledger.invoices}
+    harbor_credits = {c.credit_number: c for c in harbor_ledger.credits}
+    ledger_story = (
+        harbor_invoices["INV-2001"].payment_state == "PAID_PROPOSED"
+        and harbor_invoices["INV-2002"].payment_confirmation == "MISSING"
+        and harbor_invoices["INV-2003"].fully_credited
+        and harbor_invoices["INV-2003"].open == 0.00
+        and [c.credit_number for c in
+             harbor_invoices["INV-2003"].credits_applied] == ["CN-2003"]
+        and harbor_credits["CN-2003"].credit_state == "APPLIED"
+        and harbor_credits["CN-2003"].applied_invoice_record_id
+        == "REC-SUB-019-0"
+        and harbor_credits["CN-2002"].credit_state == "UNAPPLIED"
+        and [(b.invoice_number, b.classification)
+             for b in harbor_ledger.open_breaks] == [
+            ("INV-2002", "amount_disagrees"),
+            ("INV-2999", "missing_in_ap"),
+            ("INV-2001", "duplicates_within_statement"),
+            ("INV-2003", "missing_on_statement"),
+        ]
+    )
+    granite_ledger = service.supplier_ledger("SUP-07", "2026-11-15")
+    ledger_bank = (
+        granite_ledger.bank.warning is not None
+        and "BANK_DETAILS_CHANGED" in granite_ledger.bank.warning
+        and granite_ledger.bank.flagged_record_ids == ["REC-SUB-008-0"]
+        and granite_ledger.bank.bank_account
+        == "US00 GRAN 5555 6666 7777"  # the master's account, only
+        and harbor_ledger.bank.warning is None
+        and {e.supplier_id: e.bank_warning
+             for e in ledger_index.suppliers}["SUP-07"] is True
+        and all(
+            not e.bank_warning for e in ledger_index.suppliers
+            if e.supplier_id != "SUP-07"
+        )
+    )
+    ledger_results = {
+        "totals_tie_to_position": ledger_ties,
+        "unmatched_listed_nowhere_else": stray_unmatched,
+        "story_complete": ledger_story,
+        "bank_warning_matches_master": ledger_bank,
+    }
+
     # -- AP position scenario ------------------------------------
     # Its own service and planted records, so the due dates are
     # exact to the day and nothing above is disturbed.
@@ -668,6 +782,7 @@ def evaluate(service: ApService) -> dict:
         "remittance_confirmation": confirmation_results,
         "credit_notes": credit_results,
         "ap_position": position_results,
+        "supplier_ledger": ledger_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
@@ -707,6 +822,13 @@ def evaluate(service: ApService) -> dict:
         "position_ties_to_packet": position_results["tie_holds"],
         "position_state_split_sums": position_results["state_split_sums"],
         "position_tie_break_named": position_results["tie_break_named"],
+        "ledger_totals_tie_to_position":
+            ledger_results["totals_tie_to_position"],
+        "ledger_unmatched_listed_nowhere_else":
+            ledger_results["unmatched_listed_nowhere_else"],
+        "ledger_story_complete": ledger_results["story_complete"],
+        "ledger_bank_warning_matches_master":
+            ledger_results["bank_warning_matches_master"],
     }
     results["gate_passed"] = all(results["gates"].values())
     return results

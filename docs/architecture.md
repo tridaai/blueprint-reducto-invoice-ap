@@ -587,6 +587,93 @@ of live records, not a decision, so there is no released
 moment to freeze; the digest identifies the bytes of the
 rendering that was filed.
 
+## The supplier ledger
+
+`ledger.py` is the second pure read model, and it exists
+because the position answers the close's question (what do
+we owe, aged, in total) while an AP lead on a supplier call
+asks a different one: what is the whole story with *this*
+supplier? `build_ledger(supplier, records, recons, as_of)`
+projects one supplier's slice of the same stores; it has no
+store, no migration, and no gate, for the position's reasons.
+
+**Identity.** The ledger keys on the supplier master
+(`store.reference`) and takes a record to be the supplier's
+exactly when its `supplier_id` says so — the join the
+pipeline already performed in `graph._process_one`: the
+extracted `supplier_name` matched against
+`suppliers_by_name` (trimmed, case-insensitive, exact), or,
+failing that, the supplier of the purchase order the document
+references. The ledger adds no matching of its own. Two
+consequences are designed, not incidental. First, a document
+whose name matches nothing and whose PO resolves nothing
+keeps `supplier_id: None` forever — the ledger index lists
+such records (invoices, credit notes, statements: the classes
+intake resolves identity for) under `unmatched`, carrying the
+name as written, so a spelling variant is visible as a data
+problem. Attachment classes are excluded from that section by
+design: intake files them with their submission and never
+resolves a supplier for them (a remittance advice resolves
+its payment *run*), so calling them unmatched would invent a
+failure nobody committed. Second, an unknown supplier id is
+a 404, not an empty page — there is no ledger for a supplier
+the master does not govern.
+
+**Figures.** Per invoice the ledger reads the face off the
+extraction, the credit ledger off the record, and the open
+amount from `credits.open_amount` — the same function the
+packet, runs, and position read. Credits carry `credit_amount`
+and, while UNAPPLIED, `credits.unapplied_reason`: the ledger
+quotes the application path's own words rather than
+summarising them. Ageing buckets are not recomputed either:
+the ledger builds the position over the same snapshot and
+reads each invoice's bucket out of it, so the bucket on a
+ledger line is the bucket at close by construction.
+
+**The tie.** The ledger's totals cover every APPROVED
+invoice (face, credits, open) per currency. The position's
+supplier row covers the same universe restricted to positive
+opens, plus a separate fully-credited list at zero — so the
+two open totals must be equal, and the as-of cannot matter
+to them: ageing moves an open figure between buckets, never
+in or out of the total. That is why the ledger can be
+all-time and still tie to an as-of-parameterised report,
+taking the position at whatever as-of the caller states.
+The one honest divergence is the `NEGATIVE_OPEN` record: the
+position excludes it from its row as a named anomaly, the
+ledger's sum still counts it (it is, on its face, an approved
+invoice), and the difference is carried on
+`LedgerCurrencyTotals` as `POSITION_TIE_BREAK` with both
+figures — the position's tie verdict, reused rather than
+rebuilt. Fraud-held invoices are outside
+both totals and shown on the ledger with their flags, the
+same disclosure posture as the position's.
+
+**Bank.** `LedgerBank` is built from the `Supplier` master
+record and nothing else. The warning is assembled from the
+supplier's records' `fraud_flags` — which today can only be
+the bank screen's `BANK_DETAILS_CHANGED` — so "a warning is
+present" and "a document disagreed with the master's account
+and was held" are the same fact stated twice, never two
+judgements that could drift apart. The account a document
+presented is never copied into the ledger as the supplier's
+details; the flags themselves quote only its last four
+characters, exactly as the guardrail wrote them.
+
+**Open breaks.** A reconciliation's non-`matched` lines are
+open while the reconciliation's status is not `ACCEPTED` —
+`AWAITING_CONTROLLER` and `FLAGGED_BACK` both count as open,
+because flagged back means the AP team is taking the breaks
+to the supplier. The ledger copies the `ReconLine`s verbatim;
+classification stays reconciliation's job.
+
+Surfaces: `ApService.supplier_index(as_of)` /
+`supplier_ledger(supplier_id, as_of)`, `GET /suppliers/index`
+and `GET /suppliers/{supplier_id}/ledger` (as-of defaulting
+like `/position`'s, and always stated on the payload), the
+console's ledger section, CLI `suppliers <as-of>` /
+`ledger <supplier-id> <as-of>`, and the demo's closing act.
+
 ## Data services
 
 - **PostgreSQL** — the `records` table (one JSONB payload per

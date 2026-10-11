@@ -382,6 +382,63 @@ is that read, computed in one pass over the record store:
   in the object store, with its SHA-256 returned beside the
   bytes in the run exports' idiom.
 
+## The supplier ledger
+
+Every view above follows the money along one axis. The page
+an AP lead opens on a supplier call is the supplier's own —
+the whole relationship, on one page, every figure tracing to
+its record:
+
+- **Identity is the master's, joined the intake's way.** A
+  record is on a supplier's ledger because the pipeline joined
+  it there: the extracted supplier name matched the master
+  exactly, or the supplier of the purchase order it references
+  resolved it. The ledger runs no second matching pass. A
+  document that joined to nothing is **not** attached by
+  resemblance and **not** dropped: the index lists it under
+  **Unmatched**, with the name as the document wrote it — a
+  supplier trading under three spellings shows up as a data
+  problem, not as a third of the story quietly missing.
+- **The whole money story per invoice.** Face, the credits
+  applied against it (listed, so the figure traces), the open
+  amount the packet and the runs read, the match outcome, the
+  payment state, the bank's confirmation answer, and the
+  ageing bucket the position gives it at the ledger's as-of.
+  Credits ride with their application state and — while they
+  wait — the reason they wait, in the same words the packet
+  uses.
+- **Statement breaks, while they are open.** A break is open
+  until a controller has ACCEPTED its reconciliation;
+  flagged-back breaks are the AP team taking them to the
+  supplier, which is the opposite of settled. Both figures
+  ride every break line.
+- **Bank details from the master, only.** The ledger shows
+  the master's approved account. A document that presented
+  different details was held at intake with the guardrail's
+  flag; that flag is the ledger's bank warning, with the
+  records that raised it. No document's bank details are ever
+  shown as the supplier's.
+- **Totals that tie to the position.** The ledger is
+  all-time — a relationship has no as-of — but its payable
+  totals are taken in the position's own universe (every
+  APPROVED invoice at its open amount), and an open figure
+  does not depend on the as-of, only its ageing does. So the
+  ledger's total per currency must equal the position's
+  supplier row at the stated as-of, to the cent — and the
+  ledger carries both figures and names the difference when
+  there is one. There can be one honestly: the corrupted
+  record the position excludes as a `NEGATIVE_OPEN` anomaly
+  is still counted in the ledger's sum, and that difference
+  breaks the ledger's tie by name (`POSITION_TIE_BREAK`)
+  instead of being smoothed away.
+- **Surfaces.** `GET /suppliers/index?as_of=` and
+  `GET /suppliers/{supplier_id}/ledger?as_of=`, the console's
+  ledger section (the index with its Unmatched count, each
+  ledger a click away), CLI `suppliers <as-of>` and
+  `ledger <supplier-id> <as-of>`, and the demo's closing act —
+  Harborlight's ledger, the richest story in the world:
+  credits, a confirmation, and a statement full of breaks.
+
 ## Configuration
 
 Provider-first: the standard run is Reducto. Copy `.env.example`
@@ -477,6 +534,13 @@ gates on it:
   total; the state split must foot to the same figure; and
   a corrupted record whose ledger exceeds its face must
   break the tie by name (`POSITION_TIE_BREAK`).
+- **Supplier ledger** — Harborlight's totals (face, credits,
+  open) must tie to its position row, and every supplier's
+  ledger must tie; a stray invoice from a spelling the master
+  has never seen must land under Unmatched, on no supplier's
+  ledger; the credit, confirmation, and open-break story
+  must render whole; and the bank warning must be present
+  exactly where a document disagreed with the master.
 
 Live-Reducto eval runs are opt-in (`EVAL_LIVE=1` with a key)
 and reported, not gated.
@@ -496,6 +560,7 @@ src/reducto_ap_agent/
   payments.py      run assembly, the refusals, the bank export, in code
   confirmations.py remittance vs the released run, line by line, in code
   position.py      the AP position at close: ageing + the tie-out, in code
+  ledger.py        the supplier ledger: one supplier, the whole relationship
   guardrails.py    bank-detail, payable, and injection screens
   policy.py        every tolerance, in one module
   graph.py         the LangGraph pipeline and its gate
