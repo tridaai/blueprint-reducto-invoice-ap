@@ -5,10 +5,16 @@ payment run is a commitment device built on top of it — a
 named batch for one value date that a treasurer can release
 or return as a unit. Assembly is where the control lives:
 
-- a run takes only APPROVED, payable records (invoices and
-  credit notes; a credit note's negative total nets against
-  the batch exactly as it does in the packet — one amount
-  rule, reused, not reinvented);
+- a run takes only APPROVED invoices, each at its OPEN
+  amount — the approved face minus the credits applied
+  against it (credits.py computes it; the packet reads the
+  same figure — one amount rule, reused, not reinvented).
+  A credit note is never a member: it is applied against the
+  invoice it names, not paid as a negative instruction, so
+  the netting holds whichever batch the invoice lands in.
+  An invoice whose credits bring it to zero is refused by
+  name (FULLY_CREDITED) rather than silently dropped —
+  there is nothing to pay, and the treasurer sees why;
 - a record belongs to at most one open run. Assembly that
   names a record already held refuses it *by name*, with the
   holding run's id in the reason; a record from a released
@@ -41,6 +47,7 @@ import csv
 import hashlib
 import io
 
+from .credits import credited_invoice_number, open_amount
 from .errors import PaymentRunError
 from .schemas import (
     DocumentRecord,
@@ -50,7 +57,11 @@ from .schemas import (
     Supplier,
 )
 
-PAYABLE_CLASSES = ("invoice", "credit_note")
+# Classes that can be run MEMBERS. Credit notes are payable-path
+# documents (policy.PAYABLE_CLASSES — they are extracted,
+# matched, and gated) but they are never members: a credit is
+# applied against an invoice, not paid (credits.py).
+PAYABLE_CLASSES = ("invoice",)
 
 EXPORT_COLUMNS = [
     "payment_run_id",
@@ -73,12 +84,39 @@ def _refusal(record: DocumentRecord, currencies: list[str]) -> PaymentRefusal | 
     (already committed elsewhere, held, excepted) are named
     before the generic not-approved."""
     rid = record.record_id
+    if record.doc_class == "credit_note":
+        # A credit note is refused as a member in its own words,
+        # not as a class error: what happens to it is application
+        # (credits.py), and the refusal says which side of that
+        # line this one sits on.
+        number = (
+            str(record.extraction.value("invoice_number") or "")
+            if record.extraction else ""
+        )
+        if record.credit_state == "APPLIED":
+            reason = (
+                f"credit note {number} was applied against invoice "
+                f"record {record.applied_invoice_record_id} — its "
+                "reduction already stands in that invoice's open "
+                "amount, and a credit is never also a run member"
+            )
+        else:
+            named = credited_invoice_number(record)
+            reason = (
+                f"credit note {number} is UNAPPLIED — a credit is "
+                "applied against the invoice it names"
+                + (f" ({named})" if named else " (it names no invoice)")
+                + " by a controller, and the invoice then joins at "
+                "its net open amount; an unapplied credit never "
+                "rides a run as a negative line"
+            )
+        return PaymentRefusal(record_id=rid, code="CREDIT_NOTE", reason=reason)
     if record.doc_class not in PAYABLE_CLASSES:
         return PaymentRefusal(
             record_id=rid, code="NOT_PAYABLE_CLASS",
             reason=(
-                f"classified as {record.doc_class!r} — only invoices and "
-                "credit notes are payable"
+                f"classified as {record.doc_class!r} — only invoices "
+                "are run members"
             ),
         )
     if record.payment_state == "PAID_PROPOSED":
@@ -125,6 +163,20 @@ def _refusal(record: DocumentRecord, currencies: list[str]) -> PaymentRefusal | 
                 "enter a payment run"
             ),
         )
+    if open_amount(record) == 0.0 and record.credits_applied:
+        credits = ", ".join(
+            f"{entry.credit_number} (−{entry.amount:.2f})"
+            for entry in record.credits_applied
+        )
+        return PaymentRefusal(
+            record_id=rid, code="FULLY_CREDITED",
+            reason=(
+                f"fully credited — applied credits {credits} bring "
+                "this invoice's open amount to 0.00; there is "
+                "nothing to pay, and it is excluded rather than "
+                "carried as a zero line"
+            ),
+        )
     if currencies and record.extraction is not None \
             and record.extraction.currency not in currencies:
         return PaymentRefusal(
@@ -168,7 +220,11 @@ def assemble_run(
             invoice_number=str(record.extraction.value("invoice_number") or ""),
             doc_class=record.doc_class,  # type: ignore[arg-type]
             currency=record.extraction.currency,
-            amount=round(float(record.extraction.value("total") or 0.0), 2),
+            amount=open_amount(record),
+            gross_amount=round(
+                float(record.extraction.value("total") or 0.0), 2
+            ),
+            credits_applied=list(record.credits_applied),
         ))
     if not lines:
         named = "; ".join(

@@ -24,6 +24,15 @@ gate discipline:
   in code — exactly, never within a tolerance — and stops at
   a controller's gate. An advice that names no run on file is
   held UNMATCHED, never guessed onto one.
+- credit application sits between the gate and the packet:
+  an approved credit note is applied by a named controller
+  against the invoice its own document names, in code — to
+  the cent, never partially, never by amount-matching — and
+  from that moment the invoice's OPEN amount (face minus
+  applied credits) is what the packet proposes and the runs
+  pay. The approved face never changes; a credit against an
+  invoice a run already holds or has released is refused
+  with the state named, and stays on file for the next cycle.
 """
 
 from __future__ import annotations
@@ -40,8 +49,18 @@ from .confirmations import (
     resolve_run_reference,
     unmatched_confirmation,
 )
+from .credits import (
+    application_blocker,
+    build_application,
+    credit_amount,
+    credited_invoice_number,
+    open_amount,
+    resolve_target,
+    unapplied_reason,
+)
 from .errors import (
     ConfirmationError,
+    CreditError,
     GateError,
     PaymentRunError,
     ReconciliationError,
@@ -65,6 +84,7 @@ from .schemas import (
     PaymentRun,
     Reconciliation,
     TreasurerDecision,
+    UnappliedCredit,
 )
 
 log = logging.getLogger(__name__)
@@ -222,15 +242,108 @@ class ApService:
         recon.updated_at = _now()
         return self.store.save_reconciliation(recon)
 
+    # -- credit application ------------------------------------------
+
+    def apply_credit(self, credit_record_id: str, actor: str) -> DocumentRecord:
+        """A controller applies one approved credit note against
+        the invoice its own document names.
+
+        The blocker discipline lives in credits.py — one
+        computation, so this refusal, the packet's unapplied
+        list, and the API all speak the same words. A blocked
+        application changes nothing and raises with the
+        blocker's code in the message; a clear one writes the
+        ledger entry on the invoice and flips the credit to
+        APPLIED in the same act, both sides audited. The
+        invoice's decision and approved total are never touched
+        — application moves the derived open amount, not the
+        history."""
+        if not actor or not actor.strip():
+            raise GateError("a credit application must name its controller")
+        credit = self.get_record(credit_record_id)
+        if credit.doc_class != "credit_note":
+            raise CreditError(
+                f"record {credit_record_id} is a {credit.doc_class}, not a "
+                "credit note — only credit notes are applied"
+            )
+        if credit.extraction is None:
+            raise CreditError(
+                f"credit note {credit_record_id} carries no captured "
+                "extraction; the invoice it names was never read"
+            )
+        records = self.store.list()
+        blocker = application_blocker(credit, records)
+        if blocker is not None:
+            code, reason = blocker
+            raise GateError(f"{code}: {reason}")
+        target = resolve_target(credit, records)
+        assert target is not None  # the blocker cleared, so a target exists
+        entry = build_application(credit, target, actor, at=_now())
+        target.credits_applied.append(entry)
+        target.audit.append({
+            "event": "credit_applied", "at": _now(),
+            "detail": (
+                f"credit {entry.credit_number} ({credit.record_id}) "
+                f"applied by {actor}: {entry.amount:.2f} "
+                f"{entry.currency} — open amount now "
+                f"{open_amount(target):.2f}"
+            ),
+        })
+        target.updated_at = _now()
+        self.store.save(target)
+        credit.credit_state = "APPLIED"
+        credit.applied_invoice_record_id = target.record_id
+        credit.audit.append({
+            "event": "credit_applied", "at": _now(),
+            "detail": (
+                f"applied by {actor} against invoice "
+                f"{credited_invoice_number(credit)} ({target.record_id}) "
+                f"for {entry.amount:.2f} {entry.currency}"
+            ),
+        })
+        credit.updated_at = _now()
+        return self.store.save(credit)
+
+    def list_credits(self) -> list[dict]:
+        """Every credit note on file, enriched with the figures
+        the surfaces show: its size, the invoice its document
+        names, and — while unapplied — the reason it sits
+        unapplied, computed by the same blocker the application
+        path enforces."""
+        records = self.store.list()
+        views: list[dict] = []
+        for record in records:
+            if record.doc_class != "credit_note":
+                continue
+            view = record.model_dump()
+            view["amount"] = credit_amount(record)
+            view["credited_invoice_number"] = credited_invoice_number(record)
+            view["unapplied_reason"] = (
+                None if record.credit_state == "APPLIED"
+                else unapplied_reason(record, records)
+            )
+            views.append(view)
+        return views
+
     # -- the packet ------------------------------------------------------
 
     def payment_packet(self) -> PaymentPacket:
+        """The AP position, as a payment proposal: every approved
+        invoice at its OPEN amount (credits listed on the line),
+        plus the approved credits still unapplied, with the
+        reason each one waits. Credit notes are never lines —
+        their money already stands inside the invoice lines
+        they reduced, or in the unapplied list when it doesn't
+        yet."""
+        records = self.store.list()
         lines: list[PaymentLine] = []
         totals: dict[str, float] = {}
-        for record in self.store.list(status="APPROVED"):
+        for record in records:
+            if record.status != "APPROVED" or record.doc_class != "invoice":
+                continue
             if record.extraction is None:
                 continue
-            amount = float(record.extraction.value("total") or 0.0)
+            amount = open_amount(record)
             currency = record.extraction.currency
             lines.append(PaymentLine(
                 record_id=record.record_id,
@@ -238,11 +351,34 @@ class ApService:
                 invoice_number=str(record.extraction.value("invoice_number") or ""),
                 currency=currency,
                 amount=amount,
+                gross_amount=round(
+                    float(record.extraction.value("total") or 0.0), 2
+                ),
+                credits_applied=list(record.credits_applied),
             ))
             totals[currency] = round(totals.get(currency, 0.0) + amount, 2)
+        unapplied: list[UnappliedCredit] = []
+        for record in records:
+            if record.doc_class != "credit_note" \
+                    or record.status != "APPROVED" \
+                    or record.credit_state == "APPLIED" \
+                    or record.extraction is None:
+                continue
+            unapplied.append(UnappliedCredit(
+                record_id=record.record_id,
+                credit_number=str(
+                    record.extraction.value("invoice_number") or ""
+                ),
+                supplier_name=record.supplier_name,
+                amount=credit_amount(record),
+                currency=record.extraction.currency,
+                invoice_number=credited_invoice_number(record),
+                reason=unapplied_reason(record, records),
+            ))
         return PaymentPacket(
             packet_id=f"PKT-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
             lines=lines,
+            unapplied_credits=unapplied,
             totals_by_currency=totals,
             generated_at=_now(),
         )
