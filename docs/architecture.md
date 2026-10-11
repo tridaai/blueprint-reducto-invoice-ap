@@ -1,0 +1,244 @@
+# Architecture — Reducto Invoice AP, Deployed In-VPC
+
+This document describes the deployment, not just the code: what
+runs where, what crosses which boundary, and which decisions are
+made by arithmetic rather than by a model. It is written for the
+two readers who pick up a blueprint like this — the platform
+engineer deciding whether the shape is sound, and the finance
+operations lead deciding whether the discipline is real.
+
+## The shape in one paragraph
+
+A LangGraph pipeline takes each submission through intake,
+document processing, screening, and a three-way match, then
+stops at an interrupt — a named approver's gate — before
+anything becomes a proposed payment. The document work
+(classification, splitting, schema extraction) is done by
+Reducto behind a port; everything that decides money is done by
+this codebase, in code, against reference data. Records live in
+PostgreSQL, document bytes in S3-compatible object storage, and
+the graph's checkpoints in PostgreSQL too, so the API tier is
+stateless and a gate decision can land days after the match that
+produced it.
+
+## Deployment profiles
+
+The blueprint's reason to exist is that finance documents are
+sensitive enough that *where they are read* is an architectural
+decision. Two profiles, one codebase:
+
+| | `cloud` | `vpc` |
+|---|---|---|
+| Document engine | Reducto's hosted API | an engine endpoint inside the customer's boundary |
+| Engine endpoint | `https://platform.reducto.ai` | `http://reducto-engine:8080` (compose) or `REDUCTO_BASE_URL` |
+| Engine network exposure | n/a (SaaS) | internal-only service; no published port |
+| Document traffic | leaves the boundary to Reducto's API, over HTTPS | never leaves the boundary |
+| Code, guardrails, data services | identical | identical |
+
+The profile is resolved in `profiles.py` and the difference is
+exactly: the base URL handed to the Reducto adapter, and the
+compose topology. A config test pins both endpoints so the
+profiles cannot silently drift into each other's wiring.
+
+**What the VPC demo stack actually runs.** This repository does
+not contain a Reducto engine and does not fake one. The VPC
+compose overlay runs `engine_api.py` — a small service that
+answers the four Reducto API calls the adapter makes, backed by
+the offline text-layer adapter — at the internal endpoint, with
+no port published. It exists so the *topology* is real and
+testable (an internal-only engine service; document traffic
+contained) while the *engine* is honestly a stand-in. A customer
+deployment replaces that one service with their licensed
+self-hosted engine; nothing else in the stack changes. In the
+cloud profile there is no stand-in: the adapter talks to
+Reducto's real API, and without a key it refuses to start.
+
+## The document port
+
+`DocumentPort` (`ports.py`) is the only seam the pipeline knows:
+
+```
+upload(filename, data, content_type) -> UploadedDocument
+classify(doc) -> Classification        # invoice, credit_note, statement, …
+split(doc)    -> list[SubDocument]     # page ranges per logical document
+extract(doc)  -> ExtractedDocument     # fields + lines, each value cited
+```
+
+Two adapters implement it:
+
+- **`reducto`** (`reducto_docs.py`) — Reducto's public API:
+  `POST /upload` (multipart), then `/classify`, `/split`,
+  `/extract` against the returned `reducto://` reference.
+  Extraction requests a JSON schema and asks for citations with
+  numerical confidence, so extracted values come back with
+  bounding boxes the pipeline stores on the record. The adapter
+  is deliberately tolerant of response-shape detail (field
+  values arriving raw or as `{value, bbox, confidence}`
+  envelopes; results as one dict or chunked lists) and maps
+  everything in one module — an API revision is a one-file
+  change. Its failure posture is part of the contract: no key →
+  `DocumentNotConfigured` at startup; HTTP or network failure →
+  `DocumentBackendUnavailable`. There is no fallback path.
+- **`offline`** (`offline_docs.py`) — a deterministic adapter
+  over the synthetic documents' text layer. It parses labelled
+  fields and pipe-delimited line rows, and produces citations as
+  page + approximate box with `source="text_layer"`, so the
+  record shape downstream is identical to the engine's. It is
+  labelled everywhere it appears — readiness payload, eval
+  results, this document — because it is a stand-in for tests
+  and demos, not an OCR engine.
+
+Contract tests hold both adapters to the same semantics, and
+the pipeline's behaviour is identical against either — which is
+what makes the offline eval pack meaningful as a regression gate
+for the *system* (matching, screening, gating) even though it
+says nothing about the engine's extraction quality. That
+quality is what the opt-in live eval measures, reported and
+not gated.
+
+## The pipeline
+
+```
+intake → process → gate (interrupt) → apply
+```
+
+- **intake** — the submission's bytes go to object storage
+  under `submissions/<id>/<filename>`; the text layer is run
+  through the injection screen and any flags ride the state
+  into the records.
+- **process** — per sub-document from the split: attachments
+  (remittance advices, delivery notes) are stored and recorded
+  as RECEIVED, never extracted for payment; non-payable classes
+  are REFUSED with the reason on the record; payable documents
+  are extracted, screened (bank details), matched, and checked
+  for duplicates against live records. Terminal states from
+  this node: `RECEIVED`, `REFUSED`, `FRAUD_REVIEW`,
+  `EXCEPTION`, or `AWAITING_APPROVER`.
+- **gate** — an interrupt listing the submission's awaiting
+  records. The graph parks here, checkpointed. The service
+  resumes it only when every awaiting record of the submission
+  has a named decision.
+- **apply** — decisions land on the records: `APPROVED` or
+  `REJECTED`, with actor and reason in the audit trail.
+
+One graph run per submission; one thread per submission. The
+gate is per-submission because that is how documents arrive —
+a bundle's invoice waits for its own approver, and its
+remittance advice doesn't need one.
+
+## The match, in code
+
+`matching.py` compares the extraction against the purchase
+order and goods receipt. Tolerances come from `policy.py` and
+nowhere else:
+
+- a line's unit price is inside tolerance when it is within
+  **both** 2% relative and 0.50 absolute of the PO price;
+- invoice and PO totals agree when they differ by at most the
+  greater of 1% of the PO total and 1.00;
+- the invoice's stated total must agree with its own lines at
+  the same total tolerance — a document that contradicts itself
+  is an exception before it is compared to anything else;
+- invoiced quantity may not exceed received quantity when a
+  receipt exists (partial receipts are an exception by default;
+  `allow_partial_receipt` is the deliberate policy switch).
+
+Outcomes are `MATCHED`, `MATCHED_WITH_TOLERANCE` (the drift is
+recorded in the match notes — shown, not buried), or
+`EXCEPTION` with named codes: `PRICE_VARIANCE`,
+`QUANTITY_VARIANCE`, `TOTAL_MISMATCH`, `LINE_NOT_ON_PO`,
+`NO_PO_REFERENCE`, `PO_NOT_FOUND`, `NO_RECEIPT`,
+`DUPLICATE_INVOICE`. Line-level codes suppress the PO-total
+check — when a line already explains the difference, a second
+total code would be noise, and exception queues die of noise.
+
+Duplicates are detected on (supplier, invoice number) against
+live records — refused and fraud-held records don't count, so a
+corrected resubmission after a refusal is not accused of being
+its own duplicate.
+
+## Guardrails
+
+Three screens, all code, all before the gate:
+
+1. **Bank details.** The account on the invoice is compared
+   (formatting-insensitively) with the supplier master's
+   approved account. Any difference → `FRAUD_REVIEW`, with the
+   flag text showing only masked tails. The gate *cannot*
+   decide a fraud-held record — the API returns 409 — because
+   the fix belongs in the supplier master after out-of-band
+   verification, not in an approver's click. This is the
+   payment-diversion pattern, and the blueprint treats it as
+   the highest-stakes screen it runs: the eval pack's fraud
+   gate tolerates zero misses.
+2. **Payable classes.** Only `invoice` and `credit_note` enter
+   the payment path. Anything else is refused with
+   `NOT_PAYABLE_DOCUMENT` on the record — a statement that
+   looks like a bill is exactly the document this screen
+   exists for.
+3. **Injection.** Document text is untrusted input. Known
+   instruction-like markers are flagged on the record and
+   fenced out of the text copy that travels onward, so a
+   payload printed on an invoice is visible to the operator and
+   absent from anything an engine or model downstream reads.
+
+## The gate and the packet
+
+A decision is `{decision, actor, reason}`; the actor is
+required — an approval nobody signed is not an approval. The
+service enforces the discipline the graph can't: only
+`AWAITING_APPROVER` records can be decided, fraud holds and
+exceptions cannot, and a decision is final (the record leaves
+the awaiting set; corrections are new submissions, matching how
+AP actually works).
+
+The payment packet is a read model over `APPROVED` records —
+supplier, invoice number, currency, amount, credit notes as
+negative lines, totals per currency. It is generated on read,
+never stored as a mutable balance, and the system contains no
+code path that executes a payment: the packet is the input to
+the customer's AP system of record, where payment execution,
+with its own controls, already lives.
+
+## Data services
+
+- **PostgreSQL** — the `records` table (one JSONB payload per
+  record, status and supplier promoted to columns for the
+  queries the console runs) and the LangGraph Postgres
+  checkpointer. Numbered migrations in `migrations/` run at
+  startup; both stores share the one database.
+- **Object storage** — document bytes behind `ObjectStorePort`;
+  boto3 against any S3-compatible endpoint (SeaweedFS's S3
+  gateway in compose; AWS S3 in a cloud deployment).
+- **Doubles** — with `DATABASE_URL` / `S3_*` unset, in-memory
+  implementations stand in so tests and the demo run anywhere.
+  `/readiness` names which world is live (`store`,
+  `checkpointer`, profile, backend, engine endpoint), because a
+  console that won't say it's running on doubles is a console
+  that will eventually lie about production.
+
+Logs are structured JSON with a request ID threaded through
+middleware → logs → response header.
+
+## What a production deploy still needs
+
+Stated plainly, because a blueprint that hides its gaps teaches
+the wrong lesson:
+
+- **Live Reducto verification** — pending an API key; the
+  adapter's mapping is unit-tested against stubbed transports,
+  and the live eval is opt-in until then.
+- **Real documents** — the synthetic set is text-layer; scanned
+  and photographed invoices are the engine's job in production,
+  and the offline adapter does not pretend otherwise.
+- **ERP integration** — suppliers, POs, and receipts are seeded
+  from the synthetic world behind `ReferenceData`; a deployment
+  loads them from the ERP's mirrors or API.
+- **Identity** — the gate records the approver's name as
+  supplied; a deployment puts SSO in front and takes the actor
+  from the session, plus segregation-of-duties rules (an
+  approver cannot approve above their limit, or their own
+  submissions).
+- **Transport security & secrets** — TLS on every hop and a
+  secrets manager for the API key and database credentials; the
+  compose stacks carry local defaults and say so.
