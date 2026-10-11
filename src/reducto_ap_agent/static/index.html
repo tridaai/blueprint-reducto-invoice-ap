@@ -160,6 +160,14 @@
     <div id="position" class="note" style="margin-top:8px;">No position loaded yet.</div>
   </section>
 </div>
+<div style="padding: 0 28px 8px;">
+  <section>
+    <h2>Supplier ledgers</h2>
+    <p class="note" style="margin-top:0;">One supplier, the whole relationship: every document the intake joined to them, each invoice's face, credits and open amount, the statement breaks still open against them, and bank details from the supplier master only — with a warning wherever a document disagreed with them. Totals tie to the position at the same as-of. A document that joined to no supplier is listed under Unmatched — never attached by resemblance, never dropped.</p>
+    <div id="ledger-index" class="note">No suppliers loaded yet — load the demo world.</div>
+    <div id="ledger-detail"></div>
+  </section>
+</div>
 <footer>
   <img src="/favicon.svg" alt="Trida AI">
   <span>Trida AI — Blueprint: Reducto Invoice AP, deployed in-VPC</span>
@@ -501,6 +509,53 @@ async function loadConfirmations() {
   });
 }
 
+async function loadLedgers() {
+  const asOf = $("position-as-of").value || "2026-11-15";
+  const index = await api("/suppliers/index?as_of=" + asOf);
+  const host = $("ledger-index");
+  if (!index.suppliers.length) { host.innerHTML = "No suppliers on the master."; return; }
+  host.classList.remove("note");
+  let html = index.suppliers.map(s => {
+    const counts = Object.entries(s.document_counts).map(([k, n]) => `${k} ${n}`).join(" · ") || "no documents yet";
+    const open = Object.entries(s.open_totals_by_currency).map(([c, t]) => `${c} ${money(t)}`).join(" · ");
+    return `<div style="margin-bottom:6px;"><button class="secondary" data-ledger="${s.supplier_id}">${s.supplier_name}</button>
+      <span class="note">${counts}${open ? " · open " + open : ""}${s.open_break_count ? " · " + s.open_break_count + " open statement break(s)" : ""}${s.bank_warning ? ' · <span class="flag">⚠ bank-change warning</span>' : ""}</span></div>`;
+  }).join("");
+  if (index.unmatched_count)
+    html += `<p class="flag" style="margin-top:8px;">Unmatched — joined to no supplier (${index.unmatched_count}):</p>`
+      + index.unmatched.map(u => `<div class="note" style="margin-left:14px;">${u.record_id} · ${u.doc_class} · supplier written as "${u.name_as_written || "—"}" · ${u.document_number || ""} · ${money(u.total)}</div>`).join("");
+  else
+    html += `<p class="note" style="margin-top:8px;">Unmatched documents: none — every invoice, credit note and statement joined to the master.</p>`;
+  host.innerHTML = html;
+  host.querySelectorAll("button[data-ledger]").forEach(b =>
+    b.addEventListener("click", () => showLedger(b.dataset.ledger)));
+}
+
+async function showLedger(supplierId) {
+  const asOf = $("position-as-of").value || "2026-11-15";
+  const l = await api("/suppliers/" + supplierId + "/ledger?as_of=" + asOf);
+  let html = `<h2 style="margin-top:18px;">${l.supplier_name} — the whole relationship (as of ${l.as_of})</h2>
+    <p class="note">Bank details, from the supplier master: ${l.bank.bank_name} · ${l.bank.bank_account}</p>`;
+  if (l.bank.warning)
+    html += `<p class="flag">⚠ Bank-change warning — ${l.bank.warning} (records: ${l.bank.flagged_record_ids.join(", ")}). Fraud is resolved in the master, out of band; the gate cannot clear it.</p>`;
+  if (l.invoices.length) {
+    html += `<table><thead><tr><th>Invoice</th><th>Status</th><th>Face</th><th>Credits</th><th>Open</th><th>Match</th><th>Payment</th><th>Bank said</th><th>Ageing</th></tr></thead><tbody>`
+      + l.invoices.map(i => `<tr><td>${i.invoice_number}</td><td class="status st-${i.status}">${i.status}</td><td>${money(i.face)}</td><td>${i.credits_applied.length ? i.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", ") : "—"}</td><td><strong>${money(i.open)}</strong></td><td>${i.match_status || "—"}${i.exception_codes.length ? " (" + i.exception_codes.join(", ") + ")" : ""}</td><td>${i.payment_state ? i.payment_state + " · " + (i.payment_run_id || "") : "—"}</td><td>${i.payment_confirmation || "—"}</td><td>${i.bucket || (i.fully_credited ? "fully credited" : "—")}</td></tr>`).join("")
+      + `</tbody></table>`;
+  } else html += `<p class="note">No invoices on file for this supplier.</p>`;
+  if (l.credits.length)
+    html += `<h2 style="margin-top:14px;">Credit notes</h2>` + l.credits.map(c =>
+      `<div style="margin-bottom:6px;">${c.credit_number} · <strong>${c.currency} ${money(c.amount)}</strong> · ${c.credit_state || "—"}${c.credit_state === "APPLIED" ? " — applied against " + c.applied_invoice_record_id : " — " + (c.unapplied_reason || "")}</div>`).join("");
+  if (l.open_breaks.length)
+    html += `<h2 style="margin-top:14px;">Open statement breaks</h2><table><thead><tr><th>Invoice</th><th>Class</th><th>Statement</th><th>AP record</th><th>Reconciliation</th></tr></thead><tbody>`
+      + l.open_breaks.map(b => `<tr><td>${b.invoice_number}</td><td class="rc-${b.classification}">${b.classification}</td><td>${money(b.statement_amount)}</td><td>${money(b.ap_amount)}</td><td class="note">${b.reconciliation_id} · ${b.recon_status}</td></tr>`).join("")
+      + `</tbody></table>`;
+  html += l.totals.map(t =>
+    `<p class="note" style="margin-top:8px;">${t.currency}: face ${money(t.face_total)} − credits ${money(t.credits_total)} = open <strong>${money(t.open_total)}</strong> · position ${money(t.position_open_total)} — ${t.tied ? "TIED" : "POSITION_TIE_BREAK"}</p>`).join("");
+  html += `<p class="note">${l.note}</p>`;
+  $("ledger-detail").innerHTML = html;
+}
+
 $("create-run").addEventListener("click", async () => {
   $("run-error").textContent = "";
   const currencies = $("run-currencies").value.split(",").map(s => s.trim()).filter(Boolean);
@@ -513,11 +568,11 @@ $("create-run").addEventListener("click", async () => {
   } catch (e) { $("run-error").textContent = e.message; }
 });
 
-$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); });
-$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); });
-$("load-position").addEventListener("click", async () => { await loadPosition(); });
+$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadLedgers(); });
+$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadLedgers(); });
+$("load-position").addEventListener("click", async () => { await loadPosition(); await loadLedgers(); });
 $("status-filter").addEventListener("change", loadRecords);
-readiness(); loadRecords(); loadRecons(); loadRuns(); loadConfirmations(); loadPosition();
+readiness(); loadRecords(); loadRecons(); loadRuns(); loadConfirmations(); loadPosition(); loadLedgers();
 </script>
 </body>
 </html>

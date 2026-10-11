@@ -19,18 +19,23 @@ that still, itself, pays no one — and finally the bank's
 answer: a remittance advice naming the released run, reconciled
 line by line in code, with the shorts, the overpayment, the
 unaccounted members, and one line for an invoice the run never
-contained, all itemised for a controller.
+contained, all itemised for a controller — and finally the
+supplier ledger: the whole relationship with Harborlight on
+one page, its totals tied to the position, and one stray
+document that names a supplier AP has never seen spelled that
+way, listed as unmatched rather than attached by resemblance.
 """
 
 from __future__ import annotations
 
 from langgraph.checkpoint.memory import MemorySaver
 
-from .datasets import build_world, remittance_advice_doc
+from .datasets import _doc, build_world, remittance_advice_doc
 from .errors import GateError
 from .graph import ApPipeline
 from .object_store import InMemoryObjectStore
 from .offline_docs import OfflineDocumentAdapter
+from .schemas import LineItem
 from .service import ApService
 from .store import InMemoryRecordStore
 
@@ -254,6 +259,77 @@ def run_demo() -> ApService:
         print(f"  FULLY CREDITED {covered.invoice_number} "
               f"({covered.supplier_name}) face {covered.face:.2f} — "
               "credits brought it to 0.00; it owes nothing and ages nothing")
+
+    print("\nOne more document arrives — from a supplier name AP has "
+          "never seen spelled this way:")
+    stray_text = _doc("INVOICE", 1, [
+        ("Supplier", "Harbor Light Marine Supply"),
+        ("Invoice Number", "INV-2099"),
+        ("Invoice Date", "2026-09-14"),
+        ("Due Date", "2026-10-14"),
+        ("PO Reference", "PO-9998"),
+        ("Currency", "USD"),
+        ("Bank Account", "US00 HARB 6666 7777 8888"),
+        ("Subtotal", "150.00"), ("Tax", "0.00"), ("Total", "150.00"),
+    ], [LineItem(sku="SKU-N9", description="Mooring line", quantity=1,
+                 unit_price=150.00, amount=150.00)])
+    (stray,) = service.submit(
+        "SUB-DEMO-STRAY", "sub-demo-stray.pdf",
+        stray_text.encode("utf-8"), "text/plain",
+    )
+    joined = stray.supplier_id or (
+        "NONE — the name matched no master entry exactly, "
+        "and PO-9998 resolves nothing"
+    )
+    print(f"  {stray.record_id} {stray.doc_class} {stray.status} — "
+          f"joined supplier: {joined}")
+
+    print("\nThe supplier ledger — Harborlight Marine Supply (SUP-08), "
+          "the whole relationship on one page:")
+    ledger = service.supplier_ledger("SUP-08", "2026-11-15")
+    doc_counts = {}
+    for doc in ledger.documents:
+        doc_counts[doc.doc_class] = doc_counts.get(doc.doc_class, 0) + 1
+    print("  documents: " + " · ".join(
+        f"{name} {n}" for name, n in sorted(doc_counts.items())))
+    print(f"  bank (from the master): {ledger.bank.bank_name} · "
+          f"{ledger.bank.bank_account} · warning: "
+          f"{ledger.bank.warning or 'none — no document disagrees'}")
+    for inv in ledger.invoices:
+        money_state = inv.payment_state or "not in a run"
+        if inv.payment_confirmation:
+            money_state += f" · bank: {inv.payment_confirmation}"
+        ageing = inv.bucket or ("fully credited" if inv.fully_credited
+                                else "outside the position")
+        print(f"  {inv.invoice_number:<9} {inv.status:<12} face "
+              f"{inv.face:>8.2f} − credits {inv.credits_total:>6.2f} = open "
+              f"{inv.open:>8.2f} {inv.currency} · {money_state} · {ageing}")
+    for credit in ledger.credits:
+        state = credit.credit_state or "—"
+        detail = (f"applied against {credit.applied_invoice_record_id}"
+                  if credit.credit_state == "APPLIED"
+                  else credit.unapplied_reason or "")
+        print(f"  {credit.credit_number:<9} credit {credit.amount:>8.2f} "
+              f"{credit.currency} · {state} — {detail}")
+    for brk in ledger.open_breaks:
+        stmt = (f"{brk.statement_amount:.2f}"
+                if brk.statement_amount is not None else "—")
+        ap = f"{brk.ap_amount:.2f}" if brk.ap_amount is not None else "—"
+        print(f"  OPEN BREAK {brk.invoice_number:<9} "
+              f"{brk.classification:<28} statement {stmt:>8} · AP {ap:>8} "
+              f"({brk.reconciliation_id}, {brk.recon_status})")
+    for totals in ledger.totals:
+        print(f"  TOTALS {totals.currency}: face {totals.face_total:.2f} − "
+              f"credits {totals.credits_total:.2f} = open "
+              f"{totals.open_total:.2f} · position "
+              f"{totals.position_open_total:.2f} — "
+              f"{'TIED' if totals.tied else 'POSITION_TIE_BREAK'}")
+    index = service.supplier_index("2026-11-15")
+    print(f"  ledger index: {len(index.suppliers)} suppliers on the "
+          f"master · unmatched documents: {index.unmatched_count}")
+    for doc in index.unmatched:
+        print(f"  UNMATCHED {doc.record_id} — wrote its supplier as "
+              f"{doc.name_as_written!r}; attached to no supplier's ledger")
     return service
 
 

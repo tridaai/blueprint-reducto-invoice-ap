@@ -309,6 +309,19 @@ def create_app(service: ApService | None = None) -> FastAPI:
         reference = svc().store.reference
         return [s.model_dump() for s in reference.suppliers.values()]
 
+    @app.get("/suppliers/index")
+    def supplier_index(as_of: str | None = None) -> dict:
+        # The as-of ages the position the ledger totals tie to;
+        # explicit for the same reason as /position's — the
+        # report always states the date it was computed at.
+        as_of = as_of or datetime.now(timezone.utc).date().isoformat()
+        return svc().supplier_index(as_of).model_dump()
+
+    @app.get("/suppliers/{supplier_id}/ledger")
+    def supplier_ledger(supplier_id: str, as_of: str | None = None) -> dict:
+        as_of = as_of or datetime.now(timezone.utc).date().isoformat()
+        return svc().supplier_ledger(supplier_id, as_of).model_dump()
+
     return app
 
 

@@ -67,6 +67,11 @@ def main(argv: list[str] | None = None) -> int:
     p_position.add_argument("as_of", help="the close date, YYYY-MM-DD — ageing is explicit, never a hidden today")
     p_position.add_argument("--export", action="store_true",
                             help="also write the position CSV to the object store and print its key + SHA-256")
+    p_suppliers = sub.add_parser("suppliers", help="print the supplier ledger index (JSON): every master supplier with its counts, plus the unmatched documents")
+    p_suppliers.add_argument("as_of", help="the close date, YYYY-MM-DD — the date the tied position is aged at")
+    p_ledger = sub.add_parser("ledger", help="print one supplier's ledger (JSON): the whole relationship, totals tied to the position")
+    p_ledger.add_argument("supplier_id", help="the supplier's id on the master (e.g. SUP-08)")
+    p_ledger.add_argument("as_of", help="the close date, YYYY-MM-DD — the date the tied position is aged at")
     args = parser.parse_args(argv)
 
     service = build_service()
@@ -135,6 +140,11 @@ def main(argv: list[str] | None = None) -> int:
                 key, digest, _ = service.position_export(args.as_of)
                 print(f"export: {key}  sha256 {digest}")
             print(service.ap_position(args.as_of).model_dump_json(indent=2))
+        elif args.command == "suppliers":
+            print(service.supplier_index(args.as_of).model_dump_json(indent=2))
+        elif args.command == "ledger":
+            print(service.supplier_ledger(
+                args.supplier_id, args.as_of).model_dump_json(indent=2))
     except ApError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
