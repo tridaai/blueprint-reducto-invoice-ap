@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trida-blueprint-reducto-invoice-ap"
+version = "0.1.0"
+description = "Trida AI Blueprint — Reducto Invoice AP, deployed in-VPC (reference prototype)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10,<3.13"
+# Direct dependencies are pinned EXACTLY (==). Loose >= ranges made pip's
+# resolver backtrack for minutes on Python 3.10 (see constraints.txt header).
+# The full transitive set is frozen in constraints.txt; install with the
+# two-step pip fallback in the Makefile, or `uv sync` (primary).
+dependencies = [
+    "langgraph==0.6.11",
+    # The system of record is PostgreSQL: document records and the
+    # LangGraph Postgres checkpointer over psycopg 3 (see db.py /
+    # checkpoints.py). DATABASE_URL configures it; without one the
+    # service runs on in-memory test doubles.
+    "langgraph-checkpoint-postgres==3.0.5",
+    "psycopg[binary,pool]==3.3.6",
+    # Document bytes live in object storage behind a port
+    # (object_store.py): boto3 against any S3-compatible endpoint
+    # (AWS S3, SeaweedFS in the compose stacks).
+    "boto3==1.43.111",
+    "fastapi==0.143.0",
+    # FastAPI form parsing — the engine service's /upload takes
+    # multipart file uploads, which FastAPI delegates here.
+    "python-multipart==0.0.20",
+    "pydantic==2.14.0",
+    "uvicorn==0.54.0",
+    # The Reducto adapter speaks plain HTTPS (httpx) — no vendor
+    # SDK is vendored in.
+    "httpx==0.28.1",
+    # Transitive via langchain-core -> langsmith (websockets>=15.0, unbounded).
+    # websockets 17.x requires Python >=3.11. 16.0 supports Python 3.10.
+    "websockets==16.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+
+[project.scripts]
+reducto-ap-agent = "reducto_ap_agent.cli:main"
+reducto-ap-agent-demo = "reducto_ap_agent.demo:main"
+reducto-ap-engine = "reducto_ap_agent.engine_api:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+reducto_ap_agent = ["data/*.json", "static/*.html", "static/brand/*.png", "static/brand/*.svg", "static/brand/*.ico"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

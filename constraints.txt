@@ -1,0 +1,222 @@
+# Frozen dependency set for this blueprint — Python 3.10–3.12, macOS/Linux.
+#
+# Why this file exists: with loose >= ranges, `pip install -e ".[dev]"` on
+# Python 3.10 backtracked effectively forever. The trigger was transitive:
+# langchain-core -> langsmith requires websockets>=15.0 (unbounded), and
+# websockets 17.x requires Python >=3.11, so on 3.10 pip kept unwinding and
+# re-resolving langgraph / langchain-core / pydantic / uvicorn / pytest.
+#
+# This is the known-good set resolved on Python 3.12, with websockets held
+# at 16.0 (newest line supporting 3.10). Every version below supports both
+# 3.10 and 3.12. Install with:
+#
+#     pip install -r constraints.txt
+#     pip install --no-deps -e .
+#
+# (the two-step form in the Makefile — pip refuses an editable install
+# under a hashed constraints file, so the frozen set and the package
+# itself are installed in separate steps).
+#
+# Regenerate after changing pyproject.toml:
+#     uv export --frozen --all-extras --no-hashes --no-emit-project
+annotated-doc==0.0.5
+    # via fastapi
+annotated-types==0.8.0
+    # via pydantic
+anyio==4.15.1
+    # via
+    #   httpx
+    #   httpx2
+    #   langsmith
+    #   starlette
+boto3==1.43.111
+    # via trida-blueprint-reducto-invoice-ap
+botocore==1.43.111
+    # via
+    #   boto3
+    #   s3transfer
+certifi==2026.7.22
+    # via
+    #   httpcore
+    #   httpx
+    #   requests
+charset-normalizer==3.5.2
+    # via requests
+click==8.5.0
+    # via uvicorn
+colorama==0.4.6 ; sys_platform == 'win32'
+    # via pytest
+distro==1.9.0
+    # via langsmith
+exceptiongroup==1.3.1 ; python_full_version < '3.11'
+    # via
+    #   anyio
+    #   pytest
+fastapi==0.143.0
+    # via trida-blueprint-reducto-invoice-ap
+h11==0.16.0
+    # via
+    #   httpcore
+    #   httpcore2
+    #   uvicorn
+httpcore==1.0.9
+    # via httpx
+httpcore2==2.13.1 ; sys_platform != 'emscripten'
+    # via httpx2
+httpx==0.28.1
+    # via
+    #   langchain-core
+    #   langgraph-sdk
+    #   trida-blueprint-reducto-invoice-ap
+httpx2==2.13.1
+    # via langsmith
+httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
+    # via httpx2
+idna==3.20
+    # via
+    #   anyio
+    #   httpx
+    #   httpx2
+    #   requests
+iniconfig==2.3.1
+    # via pytest
+jmespath==1.1.0
+    # via
+    #   boto3
+    #   botocore
+jsonpatch==1.35
+    # via langchain-core
+jsonpointer==3.2.1
+    # via jsonpatch
+langchain-core==1.6.9
+    # via
+    #   langgraph
+    #   langgraph-checkpoint
+    #   langgraph-prebuilt
+langchain-protocol==0.0.19
+    # via langchain-core
+langgraph==0.6.11
+    # via trida-blueprint-reducto-invoice-ap
+langgraph-checkpoint==3.0.1
+    # via
+    #   langgraph
+    #   langgraph-checkpoint-postgres
+    #   langgraph-prebuilt
+langgraph-checkpoint-postgres==3.0.5
+    # via trida-blueprint-reducto-invoice-ap
+langgraph-prebuilt==0.6.5
+    # via langgraph
+langgraph-sdk==0.2.15
+    # via langgraph
+langsmith==0.14.7
+    # via langchain-core
+opentelemetry-api==1.45.1
+    # via fastapi
+orjson==3.13.0
+    # via
+    #   langgraph-checkpoint-postgres
+    #   langgraph-sdk
+    #   langsmith
+ormsgpack==1.12.2
+    # via langgraph-checkpoint
+packaging==26.3
+    # via
+    #   langchain-core
+    #   langsmith
+    #   pytest
+pluggy==1.6.0
+    # via pytest
+psycopg==3.3.6
+    # via
+    #   langgraph-checkpoint-postgres
+    #   trida-blueprint-reducto-invoice-ap
+psycopg-binary==3.3.6 ; implementation_name != 'pypy'
+    # via psycopg
+psycopg-pool==3.3.3
+    # via
+    #   langgraph-checkpoint-postgres
+    #   psycopg
+pydantic==2.14.0
+    # via
+    #   fastapi
+    #   langchain-core
+    #   langgraph
+    #   langsmith
+    #   trida-blueprint-reducto-invoice-ap
+pydantic-core==2.50.0
+    # via pydantic
+pygments==2.21.0
+    # via pytest
+pytest==9.1.1
+    # via trida-blueprint-reducto-invoice-ap
+python-dateutil==2.9.0.post0
+    # via botocore
+python-multipart==0.0.20
+    # via trida-blueprint-reducto-invoice-ap
+pyyaml==6.0.3
+    # via langchain-core
+requests==2.34.2
+    # via
+    #   langsmith
+    #   requests-toolbelt
+requests-toolbelt==1.0.0
+    # via langsmith
+s3transfer==0.19.2
+    # via boto3
+six==1.17.0
+    # via python-dateutil
+sniffio==1.3.1
+    # via langsmith
+starlette==1.7.0
+    # via fastapi
+tenacity==9.2.1
+    # via langchain-core
+tomli==2.5.0 ; python_full_version < '3.11'
+    # via pytest
+truststore==0.10.4 ; sys_platform != 'emscripten'
+    # via
+    #   httpcore2
+    #   httpx2
+typing-extensions==4.16.0
+    # via
+    #   anyio
+    #   exceptiongroup
+    #   fastapi
+    #   httpx2
+    #   langchain-core
+    #   langchain-protocol
+    #   langsmith
+    #   opentelemetry-api
+    #   psycopg
+    #   psycopg-pool
+    #   pydantic
+    #   pydantic-core
+    #   starlette
+    #   typing-inspection
+    #   uvicorn
+typing-inspection==0.4.4
+    # via
+    #   fastapi
+    #   pydantic
+tzdata==2026.5 ; sys_platform == 'win32'
+    # via psycopg
+urllib3==2.8.0
+    # via
+    #   botocore
+    #   requests
+uuid-utils==0.17.1
+    # via
+    #   langchain-core
+    #   langsmith
+uvicorn==0.54.0
+    # via trida-blueprint-reducto-invoice-ap
+websockets==16.0
+    # via
+    #   langsmith
+    #   trida-blueprint-reducto-invoice-ap
+xxhash==4.0.1
+    # via
+    #   langgraph
+    #   langsmith
+zstandard==0.25.0
+    # via langsmith
