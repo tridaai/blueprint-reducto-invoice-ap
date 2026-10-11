@@ -1,0 +1,21 @@
+{
+  "backend": "offline",
+  "cases": 17,
+  "passed": 17,
+  "match_decision_accuracy": 1.0,
+  "extraction_accuracy_by_field": {
+    "invoice_number": 1.0,
+    "total": 1.0
+  },
+  "citation_presence": 1.0,
+  "fraud_cases": 1,
+  "fraud_caught": 1,
+  "review_queue_precision": 1.0,
+  "failures": [],
+  "gates": {
+    "match_decision_accuracy == 1.0": true,
+    "fraud_misses == 0": true,
+    "citation_presence == 1.0": true
+  },
+  "gate_passed": true
+}
