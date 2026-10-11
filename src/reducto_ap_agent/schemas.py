@@ -30,6 +30,7 @@ RecordStatus = Literal[
     "REJECTED",
     "EXCEPTION",
     "FRAUD_REVIEW",
+    "PAID_DUPLICATE_HOLD",
     "REFUSED",
 ]
 
@@ -211,6 +212,54 @@ class CreditApplication(BaseModel):
     at: str = ""
 
 
+class DuplicateHoldResolution(BaseModel):
+    """A named controller's word on a paid-duplicate hold.
+    ``CONFIRMED_DUPLICATE``: the arrival is the paid invoice
+    again — the record is refused permanently, and nothing is
+    deleted. ``RELEASED_NOT_DUPLICATE``: the arrival is a
+    different bill that happens to answer to a paid invoice's
+    number at a paid figure — the hold lifts and the record
+    returns to the state its own match earned. Either way the
+    resolution rides the record permanently: actor, reason,
+    and the moment are the evidence the next arrival is
+    judged against."""
+
+    action: Literal["CONFIRMED_DUPLICATE", "RELEASED_NOT_DUPLICATE"]
+    actor: str
+    reason: str
+    at: str = ""
+
+
+class PaidDuplicateHold(BaseModel):
+    """The paid-duplicate watch's evidence against one arrival
+    (duplicates.py): this invoice-class document states the
+    number of an invoice that was already released for payment,
+    at an amount that is that invoice's paid story — its face,
+    or the net figure a released run actually instructed after
+    credits were applied (``amount_basis`` names which).
+
+    The evidence names the payment, never just the twin: the
+    original record, the run that released it, who released it
+    and when, and the amount the export instructed
+    (``amount_paid`` — the run line, not a recomputation). The
+    hold is a state of THIS record; the original record and
+    its run are never written by the watch."""
+
+    original_record_id: str
+    invoice_number: str  # the number as this arrival states it
+    supplier_name: str = ""
+    payment_run_id: str
+    released_at: str = ""
+    released_by: str = ""
+    amount_paid: float = 0.0  # the run line's instructed (net) amount
+    paid_face_amount: float = 0.0  # the original's approved face
+    currency: str = "USD"
+    arrived_amount: float = 0.0  # this arrival's stated total
+    amount_basis: Literal["FACE", "NET"] = "FACE"
+    held_at: str = ""
+    resolution: DuplicateHoldResolution | None = None
+
+
 class DocumentRecord(BaseModel):
     """One processed (sub-)document and everything decided about it."""
 
@@ -242,6 +291,15 @@ class DocumentRecord(BaseModel):
     credit_state: CreditState | None = None
     credits_applied: list[CreditApplication] = Field(default_factory=list)
     applied_invoice_record_id: str | None = None
+    # The paid-duplicate watch (duplicates.py). Set at intake
+    # when an invoice-class arrival answers to an invoice that
+    # was already released for payment, at that invoice's face
+    # or its net paid figure; the record's status is then
+    # PAID_DUPLICATE_HOLD until a named controller resolves it.
+    # The payload stays on the record after resolution — it is
+    # the permanent evidence of why the document was stopped,
+    # and of who let it through or confirmed it, and why.
+    duplicate_hold: PaidDuplicateHold | None = None
     audit: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
@@ -622,6 +680,12 @@ class LedgerInvoice(BaseModel):
     payment_run_id: str | None = None
     payment_confirmation: PaymentConfirmationState | None = None
     payment_confirmation_id: str | None = None
+    # The paid-duplicate watch's hold on this arrival, when it
+    # carries one — the evidence (the payment it answers to)
+    # and, once a controller has ruled, the resolution. An
+    # invoice with no hold leaves it None; the ledger shows
+    # the hold so a supplier call sees why the document stopped.
+    duplicate_hold: PaidDuplicateHold | None = None
     due_date: str = ""
     bucket: PositionBucket | None = None  # the position's reading at as_of
     fully_credited: bool = False  # open exactly zero, covered by credits
@@ -761,6 +825,11 @@ class SupplierIndexEntry(BaseModel):
     open_totals_by_currency: dict[str, float] = Field(default_factory=dict)
     open_break_count: int = 0
     bank_warning: bool = False
+    # Arrivals currently held by the paid-duplicate watch
+    # against this supplier's paid history — a marker on the
+    # row, because a held duplicate is the first thing an AP
+    # lead needs to know before a supplier call.
+    duplicate_hold_count: int = 0
 
 
 class SupplierIndex(BaseModel):

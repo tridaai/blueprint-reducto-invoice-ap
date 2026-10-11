@@ -41,6 +41,14 @@ def main(argv: list[str] | None = None) -> int:
     p_apply = sub.add_parser("apply-credit", help="a controller applies one credit note against the invoice it names")
     p_apply.add_argument("record_id")
     p_apply.add_argument("--actor", required=True)
+    p_watch = sub.add_parser("duplicate-watch", help="list the records held by the paid-duplicate watch, with their paid evidence and hold ages")
+    p_watch.add_argument("--as-of", default=None,
+                         help="age the holds as of this date, YYYY-MM-DD (default: today)")
+    p_resolve = sub.add_parser("resolve-duplicate", help="a controller resolves one paid-duplicate hold: confirm it, or release it as not a duplicate")
+    p_resolve.add_argument("record_id")
+    p_resolve.add_argument("action", choices=["CONFIRMED_DUPLICATE", "RELEASED_NOT_DUPLICATE"])
+    p_resolve.add_argument("--actor", required=True)
+    p_resolve.add_argument("--reason", required=True)
     sub.add_parser("packet", help="print the proposed payment packet as JSON")
     p_run = sub.add_parser("create-run", help="assemble a payment run and hold its members")
     p_run.add_argument("--value-date", required=True)
@@ -92,6 +100,16 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(service.list_credits(), indent=2))
         elif args.command == "apply-credit":
             print(service.apply_credit(args.record_id, args.actor).model_dump_json(indent=2))
+        elif args.command == "duplicate-watch":
+            from datetime import datetime, timezone
+
+            as_of = args.as_of or datetime.now(timezone.utc).date().isoformat()
+            print(json.dumps(service.list_duplicate_watch(as_of), indent=2))
+        elif args.command == "resolve-duplicate":
+            record = service.resolve_duplicate_hold(
+                args.record_id, args.action, args.actor, args.reason
+            )
+            print(record.model_dump_json(indent=2))
         elif args.command == "packet":
             print(service.payment_packet().model_dump_json(indent=2))
         elif args.command == "create-run":

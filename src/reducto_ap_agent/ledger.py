@@ -58,6 +58,12 @@ the supplier's page. This module is that page, as a read model:
   the AP team is taking it to the supplier, which is the
   opposite of settled. The break lines ride verbatim from the
   reconciliation; the ledger classifies nothing itself.
+- **A held duplicate shows with its evidence.** An invoice
+  the paid-duplicate watch stopped carries its hold on the
+  ledger line — the payment it answers to and, once ruled
+  on, the resolution — and the index counts a supplier's
+  standing holds on its row. The ledger reads the hold off
+  the record; it computes nothing about duplicates itself.
 """
 
 from __future__ import annotations
@@ -212,6 +218,7 @@ def build_ledger(
             payment_run_id=record.payment_run_id,
             payment_confirmation=record.payment_confirmation,
             payment_confirmation_id=record.payment_confirmation_id,
+            duplicate_hold=record.duplicate_hold,
             due_date=str(record.extraction.value("due_date") or ""),
             bucket=line.bucket if line else None,
             fully_credited=record.record_id in fully_credited_ids,
@@ -332,6 +339,10 @@ def build_index(
             },
             open_break_count=len(ledger.open_breaks),
             bank_warning=ledger.bank.warning is not None,
+            duplicate_hold_count=sum(
+                1 for doc in ledger.documents
+                if doc.status == "PAID_DUPLICATE_HOLD"
+            ),
         ))
     unmatched = unmatched_documents(records)
     return SupplierIndex(

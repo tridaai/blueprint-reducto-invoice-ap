@@ -39,6 +39,15 @@ gate discipline:
   pay. The approved face never changes; a credit against an
   invoice a run already holds or has released is refused
   with the state named, and stays on file for the next cycle.
+- the paid-duplicate watch stands at intake: an invoice that
+  answers to one already released for payment — same supplier,
+  same number, the paid face or the net figure the run
+  instructed — is held on the paid evidence, the gate cannot
+  decide it, and only a named controller resolves the hold,
+  with a reason, one of two ways (duplicates.py). A record
+  released from a hold becomes decidable again even though
+  its submission's gate closed long before; ``decide``
+  states how that decision lands.
 """
 
 from __future__ import annotations
@@ -64,6 +73,7 @@ from .credits import (
     resolve_target,
     unapplied_reason,
 )
+from .duplicates import evidence_summary, watch_entry
 from .errors import (
     ConfirmationError,
     CreditError,
@@ -72,7 +82,7 @@ from .errors import (
     ReconciliationError,
     RecordNotFound,
 )
-from .graph import ApPipeline
+from .graph import ApPipeline, apply_gate_decision
 from .ledger import build_index, build_ledger
 from .payments import (
     PAYABLE_CLASSES,
@@ -86,6 +96,7 @@ from .reconciliation import reconcile_statement
 from .schemas import (
     ControllerDecision,
     DocumentRecord,
+    DuplicateHoldResolution,
     PaymentConfirmation,
     PaymentLine,
     PaymentPacket,
@@ -149,6 +160,20 @@ class ApService:
                 "record is on fraud hold: bank details are verified out of band "
                 "and corrected in the supplier master — the gate cannot clear it"
             )
+        if record.status == "PAID_DUPLICATE_HOLD":
+            hold = record.duplicate_hold
+            evidence = (
+                evidence_summary(hold) if hold is not None
+                else "the record answers to an invoice already "
+                     "released for payment"
+            )
+            raise GateError(
+                f"record is held by the paid-duplicate watch: {evidence} "
+                "— the gate cannot decide a held duplicate; a "
+                "controller resolves the hold on the record "
+                "(confirm it, or release it as not a duplicate) "
+                "with a reason"
+            )
         if record.status != "AWAITING_APPROVER":
             raise GateError(
                 f"record {record_id} is {record.status}; only AWAITING_APPROVER records can be decided"
@@ -161,10 +186,124 @@ class ApService:
             if rec.submission_id == record.submission_id and rec.status == "AWAITING_APPROVER"
         ]
         if all(rid in pending for rid in awaiting):
+            decisions = dict(pending)
             config = {"configurable": {"thread_id": record.submission_id}}
-            self.pipeline.graph.invoke(Command(resume=dict(pending)), config=config)
+            self.pipeline.graph.invoke(Command(resume=decisions), config=config)
             self._pending.pop(record.submission_id, None)
+            # A record can become AWAITING_APPROVER after its
+            # submission's gate already closed — a paid-duplicate
+            # hold a controller released, weeks after the
+            # submission ran. That thread has no interrupt left
+            # to resume, so the resume above is a no-op for it
+            # and the decision would silently never land. Any
+            # record still awaiting with a decision recorded
+            # against it gets that decision applied directly,
+            # in the same write the graph's apply step makes.
+            for rid, raw in decisions.items():
+                rec = self.store.get(rid)
+                if rec is not None and rec.status == "AWAITING_APPROVER" \
+                        and rec.decision is None:
+                    apply_gate_decision(rec, raw, at=_now())
+                    self.store.save(rec)
         return self.get_record(record_id)
+
+    # -- the paid-duplicate watch --------------------------------
+
+    def list_duplicate_watch(self, as_of: str) -> list[dict]:
+        """The watch list: every record currently held by the
+        paid-duplicate watch, with the paid evidence on its
+        face and its hold's age at ``as_of`` (an ISO date —
+        explicit, like the position's, so an age can be
+        reproduced at audit). A read over the store: building
+        it writes nothing, and a resolved hold leaves the list
+        (its evidence stays on the record and the ledger)."""
+        return [
+            watch_entry(record, as_of)
+            for record in self.store.list(status="PAID_DUPLICATE_HOLD")
+        ]
+
+    def resolve_duplicate_hold(
+        self, record_id: str, action: str, actor: str, reason: str = ""
+    ) -> DocumentRecord:
+        """A named controller's word on a paid-duplicate hold.
+
+        Two exits, both recorded on the record forever.
+        CONFIRMED_DUPLICATE: the arrival is the paid invoice
+        again — the record is refused permanently, with the
+        evidence and the resolution as its refusal reason;
+        nothing is deleted, and the original payment is not
+        touched (there is no clawback here — recovery, if any,
+        is a conversation with the supplier, not a state this
+        system writes). RELEASED_NOT_DUPLICATE: the hold lifts
+        and the record returns to the state its own match
+        earned — AWAITING_APPROVER, decidable at the gate like
+        any arrival, or EXCEPTION with its own codes standing.
+        The release adjudicates this document only: a second
+        arrival of the same document is a new record and is
+        held afresh against the same paid history."""
+        if action not in ("CONFIRMED_DUPLICATE", "RELEASED_NOT_DUPLICATE"):
+            raise GateError(
+                f"hold resolution must be 'CONFIRMED_DUPLICATE' or "
+                f"'RELEASED_NOT_DUPLICATE', got {action!r}"
+            )
+        if not actor or not actor.strip():
+            raise GateError("a hold resolution must name its controller")
+        if not reason or not reason.strip():
+            raise GateError(
+                "resolving a paid-duplicate hold requires a reason — "
+                "it is the evidence the next arrival of this invoice "
+                "will be judged against"
+            )
+        record = self.get_record(record_id)
+        if record.duplicate_hold is None:
+            raise GateError(
+                f"record {record_id} carries no paid-duplicate hold "
+                "to resolve"
+            )
+        if record.status != "PAID_DUPLICATE_HOLD":
+            prior = record.duplicate_hold.resolution
+            prior_text = (
+                f" — it was resolved {prior.action} by {prior.actor} "
+                f"at {prior.at}"
+                if prior is not None else ""
+            )
+            raise GateError(
+                f"record {record_id} is {record.status}; only a "
+                f"PAID_DUPLICATE_HOLD can be resolved{prior_text}"
+            )
+        hold = record.duplicate_hold
+        hold.resolution = DuplicateHoldResolution(
+            action=action, actor=actor, reason=reason, at=_now(),  # type: ignore[arg-type]
+        )
+        evidence = evidence_summary(hold)
+        if action == "CONFIRMED_DUPLICATE":
+            record.status = "REFUSED"
+            record.refusal_reason = (
+                f"Confirmed duplicate: {evidence}. This arrival "
+                f"({record.record_id}) will never be paid. Confirmed "
+                f"by {actor}: {reason}"
+            )
+            record.audit.append({
+                "event": "duplicate_confirmed", "at": _now(),
+                "detail": f"confirmed duplicate by {actor} — {reason}",
+            })
+        else:
+            record.status = (
+                "EXCEPTION"
+                if record.match is not None
+                and record.match.status == "EXCEPTION"
+                else "AWAITING_APPROVER"
+            )
+            record.audit.append({
+                "event": "duplicate_hold_released", "at": _now(),
+                "detail": (
+                    f"released as not a duplicate by {actor} — "
+                    f"{reason}; the record returns to "
+                    f"{record.status}, the state its own match earned"
+                ),
+            })
+        record.updated_at = _now()
+        return self.store.save(record)
 
     # -- statement reconciliation ------------------------------------
 

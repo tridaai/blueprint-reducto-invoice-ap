@@ -26,6 +26,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from . import guardrails
+from .duplicates import evidence_summary, find_paid_duplicate
 from .matching import match_invoice
 from .policy import ATTACHMENT_CLASSES, DEFAULT_POLICY, MatchPolicy
 from .ports import DocumentPort, ObjectStorePort
@@ -36,6 +37,27 @@ log = logging.getLogger(__name__)
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def apply_gate_decision(record: DocumentRecord, raw: dict, *, at: str) -> None:
+    """Write one approver's decision onto one record — the
+    write the gate's apply step makes, factored out because
+    the service needs the identical write for a record whose
+    submission's gate already closed before the record became
+    decidable (a paid-duplicate hold a controller released:
+    service.decide states the case). One implementation, so a
+    decision lands the same way by either path."""
+    decision = GateDecision(
+        decision=raw["decision"], actor=raw["actor"],
+        reason=raw.get("reason", ""), at=at,
+    )
+    record.decision = decision
+    record.status = "APPROVED" if decision.decision == "approve" else "REJECTED"
+    record.audit.append({
+        "event": "gate_decision", "at": at,
+        "detail": f"{decision.decision} by {decision.actor}",
+    })
+    record.updated_at = at
 
 
 class PipelineState(TypedDict, total=False):
@@ -191,8 +213,25 @@ class ApPipeline:
 
         receipt = ref.receipts_by_po.get(po.po_number) if po else None
         result = match_invoice(extraction, po, receipt, policy=self.policy)
+        paid_hold = None
         if extraction.doc_class == "invoice":
-            result = self._duplicate_check(record, result)
+            if not record.fraud_flags:
+                # The paid-duplicate watch runs first, on the
+                # extraction just completed: an arrival that
+                # answers to a RELEASED payment is held on the
+                # paid evidence, and the generic number check
+                # below would only brand it with a blunter
+                # instrument. A fraud-flagged arrival is a fraud
+                # case first and is never the watch's (see
+                # duplicates.py).
+                paid_hold = find_paid_duplicate(
+                    record, self.store.list(),
+                    self.store.list_payment_runs(), at=_now(),
+                )
+                if paid_hold is not None:
+                    record.duplicate_hold = paid_hold
+            if paid_hold is None:
+                result = self._duplicate_check(record, result)
         record.match = result
 
         if record.doc_class == "credit_note":
@@ -216,6 +255,17 @@ class ApPipeline:
             record.status = "FRAUD_REVIEW"
             record.audit.append({
                 "event": "fraud_hold", "at": _now(), "detail": "; ".join(record.fraud_flags),
+            })
+        elif paid_hold is not None:
+            record.status = "PAID_DUPLICATE_HOLD"
+            record.audit.append({
+                "event": "paid_duplicate_hold", "at": _now(),
+                "detail": (
+                    evidence_summary(paid_hold)
+                    + " — held by the paid-duplicate watch: the "
+                      "gate cannot decide it; a controller "
+                      "resolves the hold on the record"
+                ),
             })
         elif result.status == "EXCEPTION":
             record.status = "EXCEPTION"
@@ -270,16 +320,6 @@ class ApPipeline:
             record = self.store.get(record_id)
             if record is None or record.status != "AWAITING_APPROVER":
                 continue
-            decision = GateDecision(
-                decision=raw["decision"], actor=raw["actor"],
-                reason=raw.get("reason", ""), at=_now(),
-            )
-            record.decision = decision
-            record.status = "APPROVED" if decision.decision == "approve" else "REJECTED"
-            record.audit.append({
-                "event": "gate_decision", "at": _now(),
-                "detail": f"{decision.decision} by {decision.actor}",
-            })
-            record.updated_at = _now()
+            apply_gate_decision(record, raw, at=_now())
             self.store.save(record)
         return {}

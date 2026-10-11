@@ -75,6 +75,12 @@ class ApplyCreditRequest(BaseModel):
     actor: str
 
 
+class DuplicateResolutionRequest(BaseModel):
+    action: str  # "CONFIRMED_DUPLICATE" | "RELEASED_NOT_DUPLICATE"
+    actor: str
+    reason: str = ""
+
+
 def create_app(service: ApService | None = None) -> FastAPI:
     load_dotenv()
     configure_json_logging()
@@ -189,6 +195,23 @@ def create_app(service: ApService | None = None) -> FastAPI:
     @app.post("/records/{record_id}/decision")
     def decide(record_id: str, request: DecisionRequest) -> dict:
         record = svc().decide(record_id, request.decision, request.actor, request.reason)
+        return record.model_dump()
+
+    @app.get("/duplicates/watch")
+    def duplicate_watch(as_of: str | None = None) -> list[dict]:
+        # The as-of ages the holds; explicit for the same reason
+        # as /position's — an age quoted at audit must be
+        # reproducible. It defaults to today only as a
+        # convenience; every entry states its hold's date.
+        return svc().list_duplicate_watch(
+            as_of or datetime.now(timezone.utc).date().isoformat()
+        )
+
+    @app.post("/records/{record_id}/duplicate-resolution")
+    def resolve_duplicate(record_id: str, request: DuplicateResolutionRequest) -> dict:
+        record = svc().resolve_duplicate_hold(
+            record_id, request.action, request.actor, request.reason
+        )
         return record.model_dump()
 
     @app.post("/statements/{record_id}/reconcile", status_code=201)

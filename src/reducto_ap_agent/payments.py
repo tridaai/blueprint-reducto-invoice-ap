@@ -155,6 +155,22 @@ def _refusal(record: DocumentRecord, currencies: list[str]) -> PaymentRefusal | 
                 + " — exceptions go back to the sender, not into a run"
             ),
         )
+    if record.status == "PAID_DUPLICATE_HOLD":
+        hold = record.duplicate_hold
+        return PaymentRefusal(
+            record_id=rid, code="PAID_DUPLICATE_HOLD",
+            reason=(
+                "held by the paid-duplicate watch: "
+                + (f"invoice {hold.invoice_number} was already released "
+                   f"for payment in run {hold.payment_run_id} for "
+                   f"{hold.amount_paid:.2f} {hold.currency}"
+                   if hold is not None else
+                   "the record answers to an invoice already released "
+                   "for payment")
+                + " — a controller resolves the hold on the record; "
+                "a held duplicate never rides a run"
+            ),
+        )
     if record.status != "APPROVED":
         return PaymentRefusal(
             record_id=rid, code="NOT_APPROVED",
