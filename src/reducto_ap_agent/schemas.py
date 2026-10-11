@@ -60,12 +60,28 @@ class LineItem(BaseModel):
     amount: float = 0.0
 
 
+class StatementLine(BaseModel):
+    """One open-item line on a supplier statement: the invoice the
+    supplier believes is open, and for how much. A statement line
+    is a claim by the supplier, not a fact — reconciliation is
+    where it gets checked against AP's own records."""
+
+    invoice_number: str
+    invoice_date: str = ""
+    amount: float = 0.0
+    currency: str = "USD"
+
+
 class ExtractedDocument(BaseModel):
     """The extraction of one (sub-)document, as the port returns it."""
 
     doc_class: DocClass = "unknown"
     fields: dict[str, ExtractedField] = Field(default_factory=dict)
     lines: list[LineItem] = Field(default_factory=list)
+    # Populated when the document is a statement: its open-item
+    # lines, in the order the supplier listed them (order matters —
+    # a repeated number later in the list is the duplicate break).
+    statement_lines: list[StatementLine] = Field(default_factory=list)
     currency: str = "USD"
     raw_text: str = ""  # the text layer, where the engine exposes one
 
@@ -141,6 +157,71 @@ class DocumentRecord(BaseModel):
     injection_flags: list[str] = Field(default_factory=list)
     bank_account_seen: str | None = None
     decision: GateDecision | None = None
+    audit: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+
+
+ReconClass = Literal[
+    "matched",
+    "amount_disagrees",
+    "missing_in_ap",
+    "missing_on_statement",
+    "duplicates_within_statement",
+]
+
+ReconStatus = Literal["AWAITING_CONTROLLER", "ACCEPTED", "FLAGGED_BACK"]
+
+
+class ReconLine(BaseModel):
+    """One reconciled item: a statement line, or an AP record the
+    statement never mentioned. Both figures ride along whenever
+    both exist — a break a human must judge is shown as the two
+    numbers, never collapsed into a verdict alone."""
+
+    invoice_number: str
+    classification: ReconClass
+    statement_amount: float | None = None
+    ap_amount: float | None = None
+    currency: str = "USD"
+    ap_record_id: str | None = None
+    invoice_date: str = ""
+    note: str = ""
+
+
+class ControllerDecision(BaseModel):
+    """The controller's word on a reconciliation. ``flag_back``
+    requires a note — the AP team acts on it with the supplier."""
+
+    decision: Literal["accept", "flag_back"]
+    actor: str
+    note: str = ""
+    at: str = ""
+
+
+class Reconciliation(BaseModel):
+    """A stored reconciliation of one supplier statement against
+    AP's records: every line classified, totals tied or the break
+    named, and a controller decision on top. Evidence for humans —
+    computing one never changes any document record."""
+
+    reconciliation_id: str
+    statement_record_id: str
+    submission_id: str
+    supplier_id: str
+    supplier_name: str = ""
+    period: str = ""
+    currency: str = "USD"
+    status: ReconStatus = "AWAITING_CONTROLLER"
+    lines: list[ReconLine] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    totals: dict[str, float] = Field(default_factory=dict)
+    statement_total_stated: float | None = None
+    statement_total_lines: float = 0.0
+    totals_tie: bool = False
+    flags: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    decision: ControllerDecision | None = None
     audit: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""

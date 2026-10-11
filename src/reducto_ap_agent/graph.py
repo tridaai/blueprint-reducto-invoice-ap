@@ -123,9 +123,32 @@ class ApPipeline:
 
         refusal = guardrails.payable_refusal(record.doc_class)
         if refusal:
+            if record.doc_class == "statement":
+                # The payment path refuses a statement, as it must —
+                # but the statement's open-item lines are the input
+                # to supplier reconciliation, a separate path off
+                # this same intake. Capture them on the record
+                # before the refusal lands, so reconciliation reads
+                # records, not raw documents.
+                extraction = self.documents.extract(sub)
+                extraction.doc_class = record.doc_class
+                record.extraction = extraction
+                supplier = ref.supplier_named(extraction.value("supplier_name"))
+                if supplier is not None:
+                    record.supplier_id = supplier.supplier_id
+                    record.supplier_name = supplier.name
+                record.audit.append({
+                    "event": "statement_captured", "at": _now(),
+                    "detail": (
+                        f"{len(extraction.statement_lines)} open-item lines captured "
+                        "for supplier reconciliation; the payment path still refuses "
+                        "this document"
+                    ),
+                })
             record.status = "REFUSED"
             record.refusal_reason = refusal
             record.audit.append({"event": "refused", "at": _now(), "detail": refusal})
+            record.updated_at = _now()
             return self.store.save(record)
 
         extraction = self.documents.extract(sub)

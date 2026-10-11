@@ -31,13 +31,17 @@ import httpx
 
 from .errors import DocumentBackendUnavailable, DocumentNotConfigured
 from .ports import Classification, SubDocument, UploadedDocument
-from .schemas import Citation, ExtractedDocument, ExtractedField, LineItem
+from .schemas import Citation, ExtractedDocument, ExtractedField, LineItem, StatementLine
 
 log = logging.getLogger(__name__)
 
-# The extraction schema sent with every invoice-shaped extract
-# call. Field names are the pipeline's vocabulary (schemas.py);
-# the engine is asked for exactly these, nothing more.
+# The extraction schema sent with every extract call. Field
+# names are the pipeline's vocabulary (schemas.py); the engine
+# is asked for exactly these, nothing more. One schema covers
+# both payable documents (fields + lines) and statements (the
+# statement fields + open-item lines) — the classifier has
+# already said which shape the document is, and the fields that
+# don't apply simply come back empty.
 INVOICE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -51,6 +55,8 @@ INVOICE_SCHEMA: dict[str, Any] = {
         "tax": {"type": "number"},
         "total": {"type": "number"},
         "bank_account": {"type": "string"},
+        "statement_date": {"type": "string"},
+        "period": {"type": "string"},
         "lines": {
             "type": "array",
             "items": {
@@ -61,6 +67,18 @@ INVOICE_SCHEMA: dict[str, Any] = {
                     "quantity": {"type": "number"},
                     "unit_price": {"type": "number"},
                     "amount": {"type": "number"},
+                },
+            },
+        },
+        "statement_lines": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "invoice_number": {"type": "string"},
+                    "invoice_date": {"type": "string"},
+                    "amount": {"type": "number"},
+                    "currency": {"type": "string"},
                 },
             },
         },
@@ -231,6 +249,7 @@ class ReductoDocumentAdapter:
             raise DocumentBackendUnavailable("Reducto /extract returned no result object")
         fields: dict[str, ExtractedField] = {}
         lines: list[LineItem] = []
+        statement_lines: list[StatementLine] = []
         for key, raw in result.items():
             if key == "lines" and isinstance(raw, list):
                 for row in raw:
@@ -242,6 +261,18 @@ class ReductoDocumentAdapter:
                                 quantity=float(row.get("quantity") or 0),
                                 unit_price=float(row.get("unit_price") or 0),
                                 amount=float(row.get("amount") or 0),
+                            )
+                        )
+                continue
+            if key == "statement_lines" and isinstance(raw, list):
+                for row in raw:
+                    if isinstance(row, dict):
+                        statement_lines.append(
+                            StatementLine(
+                                invoice_number=str(row.get("invoice_number") or ""),
+                                invoice_date=str(row.get("invoice_date") or ""),
+                                amount=float(row.get("amount") or 0),
+                                currency=str(row.get("currency") or "USD"),
                             )
                         )
                 continue
@@ -257,5 +288,6 @@ class ReductoDocumentAdapter:
         return ExtractedDocument(
             fields=fields,
             lines=lines,
+            statement_lines=statement_lines,
             currency=str(fields["currency"].value) if "currency" in fields and fields["currency"].value else "USD",
         )

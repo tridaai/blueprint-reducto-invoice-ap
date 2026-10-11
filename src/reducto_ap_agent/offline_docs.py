@@ -23,7 +23,7 @@ import re
 
 from .errors import DocumentBackendUnavailable
 from .ports import Classification, SubDocument, UploadedDocument
-from .schemas import Citation, ExtractedDocument, ExtractedField, LineItem
+from .schemas import Citation, ExtractedDocument, ExtractedField, LineItem, StatementLine
 
 _SECTION_RE = re.compile(r"\[DOCUMENT:\s*([A-Z ]+)\]\s*$", re.MULTILINE)
 _PAGE_RE = re.compile(r"^=== PAGE (\d+) ===\s*$", re.MULTILINE)
@@ -51,6 +51,8 @@ _FIELD_BY_LABEL = {
     "Subtotal": "subtotal",
     "Tax": "tax",
     "Total": "total",
+    "Statement Date": "statement_date",
+    "Period": "period",
 }
 
 _NUMERIC_FIELDS = {"subtotal", "tax", "total"}
@@ -148,6 +150,7 @@ class OfflineDocumentAdapter:
         section = self._section_for(doc)
         fields: dict[str, ExtractedField] = {}
         lines: list[LineItem] = []
+        statement_lines: list[StatementLine] = []
         page_lines: dict[int, int] = {}
         current_page = section.page_start
         for raw_line in section.text.splitlines():
@@ -179,6 +182,22 @@ class OfflineDocumentAdapter:
                         continue
                     except ValueError:
                         pass
+                if len(parts) == 4 and section.marker == "STATEMENT":
+                    # Statement open-item row: number | date | currency | amount.
+                    # The header row lands here too and fails the amount
+                    # parse, which is what skips it.
+                    try:
+                        statement_lines.append(
+                            StatementLine(
+                                invoice_number=parts[0],
+                                invoice_date=parts[1],
+                                currency=parts[2] or "USD",
+                                amount=float(parts[3].replace(",", "")),
+                            )
+                        )
+                        continue
+                    except ValueError:
+                        pass
             if ":" in stripped:
                 label, _, value = stripped.partition(":")
                 field_name = _FIELD_BY_LABEL.get(label.strip())
@@ -196,6 +215,7 @@ class OfflineDocumentAdapter:
             doc_class=_CLASS_BY_MARKER.get(section.marker, "unknown"),
             fields=fields,
             lines=lines,
+            statement_lines=statement_lines,
             currency=str(fields["currency"].value) if "currency" in fields else "USD",
             raw_text=section.text,
         )

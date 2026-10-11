@@ -14,6 +14,11 @@ total that disagrees with its own lines, a purchase order that
 does not exist, a receipt that never arrived, an extra line the
 PO never ordered, and one invoice carrying an instruction-like
 payload in its notes for the injection screen.
+
+The statement cases plant the reconciliation breaks: one
+statement carrying a matched line, a disagreement, an invoice
+AP never received, a duplicated line, and an omission — and one
+statement that agrees with AP to the cent.
 """
 
 from __future__ import annotations
@@ -90,6 +95,28 @@ def _inv_fields(supplier: Supplier, number: str, po: str | None,
     return fields
 
 
+def _statement_doc(supplier: Supplier, statement_date: str, period: str,
+                   rows: list[tuple[str, str, float]], total: float,
+                   currency: str = "USD") -> str:
+    """A supplier statement in the text-layer format: header
+    fields, then one open-item row per invoice the supplier
+    believes is open — ``number | date | currency | amount`` —
+    and the statement's own stated total."""
+    out = [
+        "=== PAGE 1 ===",
+        "[DOCUMENT: STATEMENT]",
+        f"Supplier: {supplier.name}",
+        f"Statement Date: {statement_date}",
+        f"Period: {period}",
+        f"Currency: {currency}",
+        "Lines:",
+        "Invoice | Date | Currency | Amount",
+    ]
+    out += [f"{number} | {date} | {currency} | {amount:.2f}" for number, date, amount in rows]
+    out.append(f"Total: {total:.2f}")
+    return "\n".join(out) + "\n"
+
+
 def build_world() -> World:
     suppliers = [
         Supplier(supplier_id="SUP-01", name="Alder & Frost GmbH", bank_account="DE27 1001 2003 4005 6007", bank_name="Frost Bank"),
@@ -131,6 +158,9 @@ def build_world() -> World:
         po("PO-6013", "SUP-12", [L("SKU-H1", "Resin drums", 12, 90.00)], currency="EUR"),
         po("PO-6014", "SUP-01", [L("SKU-J1", "Frost seals", 6, 50.00)]),
         po("PO-6016", "SUP-04", [L("SKU-C9", "Junction boxes", 10, 30.00)]),
+        po("PO-6020", "SUP-08", [L("SKU-N1", "Anchor chain", 10, 90.00)]),
+        po("PO-6021", "SUP-08", [L("SKU-N2", "Deck paint", 5, 80.00)]),
+        po("PO-6022", "SUP-08", [L("SKU-N3", "Rope coils", 4, 50.00)]),
     ]
     receipts = [
         rcv("RCV-6001", "PO-6001", "SUP-02", [L("SKU-A1", "Industrial valves", 10, 120.00), L("SKU-A2", "Gasket sets", 5, 40.00)]),
@@ -142,6 +172,9 @@ def build_world() -> World:
         rcv("RCV-6011", "PO-6011", "SUP-10", [L("SKU-G1", "Canvas rolls", 30, 12.00)]),
         rcv("RCV-6013", "PO-6013", "SUP-12", [L("SKU-H1", "Resin drums", 12, 90.00)]),
         rcv("RCV-6014", "PO-6014", "SUP-01", [L("SKU-J1", "Frost seals", 6, 50.00)]),
+        rcv("RCV-6020", "PO-6020", "SUP-08", [L("SKU-N1", "Anchor chain", 10, 90.00)]),
+        rcv("RCV-6021", "PO-6021", "SUP-08", [L("SKU-N2", "Deck paint", 5, 80.00)]),
+        rcv("RCV-6022", "PO-6022", "SUP-08", [L("SKU-N3", "Rope coils", 4, 50.00)]),
         # PO-6016 deliberately has no receipt.
     ]
 
@@ -150,8 +183,8 @@ def build_world() -> World:
     def add(sid: str, text: str, expected: list[ExpectedDoc]) -> None:
         subs.append(Submission(submission_id=sid, filename=f"{sid.lower()}.pdf", text=text, expected=expected))
 
-    s02, s03, s04, s05, s06, s07, s09, s10, s11, s12, s01 = (
-        by_id[k] for k in ("SUP-02", "SUP-03", "SUP-04", "SUP-05", "SUP-06", "SUP-07", "SUP-09", "SUP-10", "SUP-11", "SUP-12", "SUP-01"))
+    s02, s03, s04, s05, s06, s07, s08, s09, s10, s11, s12, s01 = (
+        by_id[k] for k in ("SUP-02", "SUP-03", "SUP-04", "SUP-05", "SUP-06", "SUP-07", "SUP-08", "SUP-09", "SUP-10", "SUP-11", "SUP-12", "SUP-01"))
 
     inv1001_lines = [L("SKU-A1", "Industrial valves", 10, 120.00), L("SKU-A2", "Gasket sets", 5, 40.00)]
     add("SUB-001", _doc("INVOICE", 1, _inv_fields(s02, "INV-1001", "PO-6001", 1400.00), inv1001_lines),
@@ -198,5 +231,33 @@ def build_world() -> World:
         [ExpectedDoc("invoice", "EXCEPTION", "INV-1015", 1150.00, "EXCEPTION", ["LINE_NOT_ON_PO"])])
     add("SUB-016", _doc("INVOICE", 1, _inv_fields(s04, "INV-1016", "PO-6016", 300.00), [L("SKU-C9", "Junction boxes", 10, 30.00)]),
         [ExpectedDoc("invoice", "EXCEPTION", "INV-1016", 300.00, "EXCEPTION", ["NO_RECEIPT"])])
+
+    # -- the statement world -------------------------------------
+    # Three clean Harborlight invoices, then two statements. The
+    # Harborlight statement plants one break of every class; the
+    # Cedarline statement lists exactly what AP holds, at the
+    # amounts AP holds, and must reconcile clean. Statement gold
+    # lives in the eval pack's reconciliation gates — here the
+    # documents only carry their payment-path expectation
+    # (REFUSED: a statement is never payable).
+    add("SUB-017", _doc("INVOICE", 1, _inv_fields(s08, "INV-2001", "PO-6020", 900.00), [L("SKU-N1", "Anchor chain", 10, 90.00)]),
+        [ExpectedDoc("invoice", "AWAITING_APPROVER", "INV-2001", 900.00, "MATCHED")])
+    add("SUB-018", _doc("INVOICE", 1, _inv_fields(s08, "INV-2002", "PO-6021", 400.00), [L("SKU-N2", "Deck paint", 5, 80.00)]),
+        [ExpectedDoc("invoice", "AWAITING_APPROVER", "INV-2002", 400.00, "MATCHED")])
+    add("SUB-019", _doc("INVOICE", 1, _inv_fields(s08, "INV-2003", "PO-6022", 200.00), [L("SKU-N3", "Rope coils", 4, 50.00)]),
+        [ExpectedDoc("invoice", "AWAITING_APPROVER", "INV-2003", 200.00, "MATCHED")])
+    add("SUB-020", _statement_doc(s08, "2026-09-30", "2026-09", [
+        ("INV-2001", "2026-09-05", 900.00),    # matches AP exactly
+        ("INV-2002", "2026-09-12", 440.00),    # AP holds 400.00 — amount disagrees
+        ("INV-2999", "2026-09-18", 275.00),    # AP has never seen this invoice
+        ("INV-2001", "2026-09-05", 900.00),    # listed twice on one statement
+        # INV-2003 (AP holds 200.00) is absent — missing on statement
+    ], total=2515.00),
+        [ExpectedDoc("statement", "REFUSED")])
+    add("SUB-021", _statement_doc(s03, "2026-09-30", "2026-09", [
+        ("INV-1002", "2026-09-14", 1010.00),
+        ("INV-1015", "2026-09-14", 1150.00),
+    ], total=2160.00),
+        [ExpectedDoc("statement", "REFUSED")])
 
     return World(suppliers=suppliers, purchase_orders=purchase_orders, receipts=receipts, submissions=subs)
