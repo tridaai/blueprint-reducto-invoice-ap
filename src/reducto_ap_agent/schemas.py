@@ -360,6 +360,141 @@ class PaymentPacket(BaseModel):
     note: str = "Proposed payments for the customer's AP system of record. Nothing here has been paid."
 
 
+PositionBucket = Literal["CURRENT", "1-30", "31-60", "61-90", "90+", "UNDATED"]
+PositionState = Literal["OPEN_FREE", "IN_RUN", "PAID_PROPOSED"]
+TieStatus = Literal["TIED", "POSITION_TIE_BREAK"]
+
+
+class PositionLine(BaseModel):
+    """One payable in the AP position (position.py): an APPROVED
+    invoice with a positive OPEN amount, aged off its due date.
+    ``state`` is where the money stands — free, held by an open
+    run, or released as PAID_PROPOSED — a second dimension over
+    the same open figure, so the state split and the ageing
+    split are two readings of one total and must agree."""
+
+    record_id: str
+    supplier_id: str | None = None
+    supplier_name: str = ""
+    invoice_number: str = ""
+    currency: str = "USD"
+    face: float = 0.0
+    credits: float = 0.0  # applied credits against the face
+    open: float = 0.0
+    invoice_date: str = ""
+    due_date: str = ""  # "" when the record carries none → UNDATED
+    days_past_due: int | None = None  # None when UNDATED
+    bucket: PositionBucket = "UNDATED"
+    state: PositionState = "OPEN_FREE"
+    payment_run_id: str | None = None
+
+
+class SupplierPosition(BaseModel):
+    """One supplier's slice of the position, in one currency:
+    the records under the row, and the row's own splits. The
+    console expands a row into ``lines``; the totals are the
+    sums of those lines, computed in the same pass."""
+
+    supplier_id: str | None = None
+    supplier_name: str = ""
+    currency: str = "USD"
+    lines: list[PositionLine] = Field(default_factory=list)
+    bucket_totals: dict[str, float] = Field(default_factory=dict)
+    state_totals: dict[str, float] = Field(default_factory=dict)
+    face_total: float = 0.0
+    credits_total: float = 0.0
+    open_total: float = 0.0
+
+
+class PositionAnomaly(BaseModel):
+    """A record the position cannot age and will not hide: an
+    APPROVED invoice whose applied-credit ledger exceeds its
+    face, so its open amount is negative. Application refuses
+    over-credit in code (credits.py), so this state is only
+    reachable by a corrupted record — the position names it,
+    keeps it out of the buckets, and lets it break the tie."""
+
+    record_id: str
+    supplier_name: str = ""
+    invoice_number: str = ""
+    currency: str = "USD"
+    face: float = 0.0
+    credits: float = 0.0
+    open: float = 0.0
+    code: str = "NEGATIVE_OPEN"
+    detail: str = ""
+
+
+class FraudHeldLine(BaseModel):
+    """An invoice on fraud hold, disclosed beside the position:
+    real money in dispute, excluded from the packet's universe
+    (the packet reads APPROVED records only) and therefore from
+    the tie — shown with its flags so the close sees it."""
+
+    record_id: str
+    supplier_name: str = ""
+    invoice_number: str = ""
+    currency: str = "USD"
+    face: float = 0.0
+    open: float = 0.0
+    fraud_flags: list[str] = Field(default_factory=list)
+
+
+class FullyCreditedLine(BaseModel):
+    """An APPROVED invoice whose applied credits bring its open
+    amount to exactly zero. It owes nothing and ages nothing;
+    it is listed so the close can see the cover happened."""
+
+    record_id: str
+    supplier_name: str = ""
+    invoice_number: str = ""
+    currency: str = "USD"
+    face: float = 0.0
+    credits: float = 0.0
+
+
+class CurrencyTie(BaseModel):
+    """The tie-out for one currency: the packet's open total
+    against the position's aged total, and the difference when
+    they are not the same number."""
+
+    currency: str = "USD"
+    packet_total: float = 0.0
+    position_total: float = 0.0
+    difference: float = 0.0  # packet_total - position_total
+    tied: bool = True
+
+
+class PositionReport(BaseModel):
+    """The AP position at close (position.py): every payable
+    aged by due date as of ``as_of``, split by the state of its
+    money, and tied to the packet's open total in the same
+    pass. A read model — building it moves no money and writes
+    no record. When the tie breaks the report says so in
+    ``tie_status`` and names the break per currency; it never
+    presents itself as tied when it is not."""
+
+    as_of: str
+    bucket_edges: list[int] = Field(default_factory=list)
+    suppliers: list[SupplierPosition] = Field(default_factory=list)
+    bucket_totals_by_currency: dict[str, dict[str, float]] = Field(
+        default_factory=dict)
+    state_totals_by_currency: dict[str, dict[str, float]] = Field(
+        default_factory=dict)
+    open_totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    ties: list[CurrencyTie] = Field(default_factory=list)
+    tie_status: TieStatus = "TIED"
+    fraud_held: list[FraudHeldLine] = Field(default_factory=list)
+    fraud_held_totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    fully_credited: list[FullyCreditedLine] = Field(default_factory=list)
+    anomalies: list[PositionAnomaly] = Field(default_factory=list)
+    splits_agree: bool = True  # bucket split and state split both foot to the open totals
+    note: str = (
+        "Ageing runs off due dates as of the stated date. Fraud-held "
+        "money is disclosed beside the position, outside the tie."
+    )
+
+
 RunStatus = Literal["AWAITING_TREASURER", "RELEASED", "RETURNED"]
 
 

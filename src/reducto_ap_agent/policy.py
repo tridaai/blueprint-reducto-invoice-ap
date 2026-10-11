@@ -43,6 +43,40 @@ class MatchPolicy:
 
 DEFAULT_POLICY = MatchPolicy()
 
+
+@dataclass(frozen=True)
+class AgeingPolicy:
+    """Bucket edges for the AP position's ageing (position.py).
+
+    Ageing runs off the DUE date, never off age since invoice:
+    what matters at close is how far past its terms a payable
+    stands. Days past due is ``(as_of - due_date).days`` and the
+    buckets are upper-edge inclusive — an item exactly on an
+    edge belongs to the earlier bucket:
+
+    - ``days <= 0``            → CURRENT (not yet due, or due today)
+    - ``1 .. first_edge``      → 1–30
+    - ``.. second_edge``       → 31–60
+    - ``.. third_edge``        → 61–90
+    - ``days > third_edge``    → 90+
+
+    An invoice with no due date on record is none of these: it
+    is UNDATED, its own line class, shown and totalled but never
+    silently bucketed by an age it does not carry.
+    """
+
+    first_edge: int = 30
+    second_edge: int = 60
+    third_edge: int = 90
+
+
+DEFAULT_AGEING = AgeingPolicy()
+
+# The ageing bucket names, in report order. UNDATED is not an
+# age; it sits last so a reader's eye lands on it after the
+# dated money, the way a controller scans a subledger.
+AGEING_BUCKETS = ("CURRENT", "1-30", "31-60", "61-90", "90+", "UNDATED")
+
 # Document classes the payment path accepts. Everything else the
 # classifier returns — statements, letters, delivery notes standing
 # alone — is refused by the payment path with the reason recorded.
