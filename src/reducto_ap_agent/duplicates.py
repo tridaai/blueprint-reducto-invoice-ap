@@ -30,10 +30,13 @@ completes, before the record can reach the gate):
   whose number was read with different case or spacing slips
   it; the watch does not. And an amount relationship, below.
 - **The history it checks is paid history.** A twin counts
-  only when it is a member of a RELEASED run — its record is
-  PAID_PROPOSED and the run stands RELEASED. A twin that is
-  merely approved, or held in an open run, is the co-pending
-  case the pipeline's own check already owns.
+  when RELEASED runs have instructed money for it — in full
+  (PAID_PROPOSED) or in part (PART_PAID): a part-paid
+  original is paid history too, because the parts the runs
+  instructed are exactly the money a resend would take
+  twice. A twin that is merely approved, or held in an open
+  run, is the co-pending case the pipeline's own check
+  already owns.
 - **The amount must be the paid invoice's own figure, to the
   cent.** Exact equality — no tolerance anywhere near this:
   the match policy's tolerances absorb document-reading
@@ -41,12 +44,17 @@ completes, before the record can reach the gate):
   an accusation (the rule confirmations set in round 4).
   Two bases, named on the hold: FACE — the arrival states the
   original's approved face; NET — the arrival states the
-  figure the released run actually instructed, the face minus
-  the credits applied before release. A supplier who was
+  total the released runs actually instructed across every
+  part payment, each run's line summed (for one whole
+  payment, the net figure that run instructed after the
+  credits applied before release). A supplier who was
   credited and re-bills at the net figure is the classic
   second arrival, and the hold says which figure it matched.
-  An arrival at any other amount is NOT held: it is surfaced
-  by the pipeline's number rule as a DUPLICATE_INVOICE
+  The evidence is read from the runs' lines themselves —
+  what was instructed, when, is history the invoice's later
+  credits (which may land on a part-paid remainder) cannot
+  rewrite. An arrival at any other amount is NOT held: it is
+  surfaced by the pipeline's number rule as a DUPLICATE_INVOICE
   exception, exactly as before — a different amount is a
   different claim, and it is a human's exception, not this
   watch's hold.
@@ -123,7 +131,6 @@ def find_paid_duplicate(
     if not number:
         return None
     arrived = _cents(float(record.extraction.value("total") or 0.0))
-    runs_by_id = {run.run_id: run for run in runs}
     for other in records:
         if other.record_id == record.record_id:
             continue
@@ -134,23 +141,23 @@ def find_paid_duplicate(
         if _normalise(str(other.extraction.value("invoice_number") or "")) \
                 != _normalise(str(number)):
             continue
-        if other.payment_state != "PAID_PROPOSED" \
-                or not other.payment_run_id:
+        # The twin's paid history, read off the runs themselves:
+        # every RELEASED run whose lines instruct money for this
+        # record, and the total they instructed. The runs are
+        # scanned in store order, so the last paying run is the
+        # most recent instruction — the one the evidence names.
+        paying: list[tuple[PaymentRun, float, str]] = []
+        for run in runs:
+            if run.status != "RELEASED":
+                continue
+            for line in run.lines:
+                if line.record_id == other.record_id:
+                    paying.append(
+                        (run, _cents(line.amount), line.currency))
+        if not paying:
             continue
-        run = runs_by_id.get(other.payment_run_id)
-        if run is None or run.status != "RELEASED":
-            continue
-        line = next(
-            (l for l in run.lines if l.record_id == other.record_id), None
-        )
-        if line is None:
-            continue
-        # The amount the bank was instructed to pay is the run
-        # line's — the figure at release, not a recomputation.
-        # It equals the record's open amount (credits against a
-        # paid-proposed invoice are refused, so it cannot have
-        # moved since), and the hold names both readings.
-        paid = _cents(line.amount)
+        run, _, currency = paying[-1]
+        paid = _cents(sum(amount for _, amount, _ in paying))
         face = _cents(float(other.extraction.value("total") or 0.0))
         if arrived == face:
             basis = "FACE"
@@ -167,7 +174,7 @@ def find_paid_duplicate(
             released_by=run.decision.actor if run.decision else "",
             amount_paid=paid,
             paid_face_amount=face,
-            currency=line.currency,
+            currency=currency,
             arrived_amount=arrived,
             amount_basis=basis,  # type: ignore[arg-type]
             held_at=at,
@@ -182,10 +189,11 @@ def evidence_summary(hold: PaidDuplicateHold) -> str:
     everywhere."""
     return (
         f"invoice {hold.invoice_number} was already released for "
-        f"payment as {hold.original_record_id} in payment run "
+        f"payment as {hold.original_record_id} — "
+        f"{hold.amount_paid:.2f} {hold.currency} instructed "
+        f"across released runs, most recently payment run "
         f"{hold.payment_run_id} (released {hold.released_at} by "
-        f"{hold.released_by}) for {hold.amount_paid:.2f} "
-        f"{hold.currency}; this arrival states "
+        f"{hold.released_by}); this arrival states "
         f"{hold.arrived_amount:.2f} — the {hold.amount_basis} figure"
     )
 

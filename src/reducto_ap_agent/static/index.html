@@ -151,7 +151,7 @@
 <div style="padding: 0 28px 8px;">
   <section>
     <h2>AP position at close</h2>
-    <p class="note" style="margin-top:0;">What we owe, to whom, and how old it is — aged off due dates as of the stated date, split by the state of the money (free, in a run, paid-proposed), and tied to the packet's open total in the same pass. Fraud-held money is disclosed beside the position, outside the tie. An invoice with no due date on record is UNDATED — shown, never silently bucketed.</p>
+    <p class="note" style="margin-top:0;">What we owe, to whom, and how old it is — aged off due dates as of the stated date, split by the state of the money (free, in a run, part-paid with the remainder still owing), and tied to the packet's open total in the same pass. Only the remainder ages: money already instructed is shown as the paid figure beside it, never as still owed. Fraud-held money is disclosed beside the position, outside the tie. An invoice with no due date on record is UNDATED — shown, never silently bucketed.</p>
     <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
       <input id="position-as-of" type="date" value="2026-11-15">
       <button id="load-position" class="secondary">Age the position</button>
@@ -164,7 +164,7 @@
 <div style="padding: 0 28px 8px;">
   <section>
     <h2>Paid-duplicate watch</h2>
-    <p class="note" style="margin-top:0;">The duplicate that arrives second: an invoice that answers to one already released for payment — same supplier, same number, at the paid face or the net figure the run instructed — is held at intake on the paid evidence below. The gate cannot decide a held record; a named controller resolves the hold, with a reason, one of two ways: confirm it (the record is refused permanently) or release it as not a duplicate (it returns to the state its own match earned). Nothing here touches the original payment — there is no clawback, only a stop on the second one.</p>
+    <p class="note" style="margin-top:0;">The duplicate that arrives second: an invoice that answers to one already released for payment — same supplier, same number, at the paid face or the total the released runs instructed across every part payment — is held at intake on the paid evidence below. The gate cannot decide a held record; a named controller resolves the hold, with a reason, one of two ways: confirm it (the record is refused permanently) or release it as not a duplicate (it returns to the state its own match earned). Nothing here touches the original payment — there is no clawback, only a stop on the second one.</p>
     <div id="watch-list" class="note">No held duplicates — nothing on file answers to a payment already released.</div>
   </section>
 </div>
@@ -225,8 +225,13 @@ async function loadRecords() {
   let packetHtml = packet.lines.length
     ? packet.lines.map(l => {
         let line = `<div>${l.supplier_name} · ${l.invoice_number} · <strong>${l.currency} ${money(l.amount)}</strong>`;
+        const reductions = [];
         if (l.credits_applied && l.credits_applied.length)
-          line += ` <span class="note">(face ${money(l.gross_amount)} − credits ${l.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", ")})</span>`;
+          reductions.push("credits " + l.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", "));
+        if (l.payments_applied && l.payments_applied.length)
+          reductions.push("payments released " + l.payments_applied.map(p => money(p.amount) + " in " + p.run_id).join(", "));
+        if (reductions.length)
+          line += ` <span class="note">(face ${money(l.gross_amount)} − ${reductions.join(" − ")})</span>`;
         return line + `</div>`;
       }).join("")
       + `<div class="note" style="margin-top:6px;">${packet.note}</div>`
@@ -261,10 +266,10 @@ async function loadPosition() {
   let html = p.suppliers.length ? p.suppliers.map(s => {
     const buckets = bucketNames.filter(n => s.bucket_totals[n])
       .map(n => `${n} ${money(s.bucket_totals[n])}`).join(" · ");
-    const states = ["OPEN_FREE", "IN_RUN", "PAID_PROPOSED"].filter(n => s.state_totals[n])
+    const states = ["OPEN_FREE", "IN_RUN", "PAID_PROPOSED", "PART_PAID"].filter(n => s.state_totals[n])
       .map(n => `${n} ${money(s.state_totals[n])}`).join(" · ");
-    const lines = s.lines.map(l => `<div class="note" style="margin-left:14px;">${l.invoice_number} · due ${l.due_date || "—"} · ${l.bucket}${l.days_past_due === null ? "" : " (" + l.days_past_due + "d)"} · ${l.state} · face ${money(l.face)} − credits ${money(l.credits)} = <strong>${money(l.open)}</strong></div>`).join("");
-    return `<details><summary>${s.supplier_name} · ${s.currency} <strong>${money(s.open_total)}</strong> <span class="note">${buckets}${states ? " · " + states : ""}</span></summary>${lines}</details>`;
+    const lines = s.lines.map(l => `<div class="note" style="margin-left:14px;">${l.invoice_number} · due ${l.due_date || "—"} · ${l.bucket}${l.days_past_due === null ? "" : " (" + l.days_past_due + "d)"} · ${l.state} · face ${money(l.face)} − credits ${money(l.credits)}${l.paid ? " − paid " + money(l.paid) : ""} = <strong>${money(l.open)}</strong></div>`).join("");
+    return `<details><summary>${s.supplier_name} · ${s.currency} <strong>${money(s.open_total)}</strong>${s.paid_total ? ` <span class="note">paid ${money(s.paid_total)}</span>` : ""} <span class="note">${buckets}${states ? " · " + states : ""}</span></summary>${lines}</details>`;
   }).join("") : "No approved payables — the position is empty.";
   if (p.fraud_held.length)
     html += `<div style="margin-top:8px;">Fraud-held (outside the tie): ` + p.fraud_held.map(h =>
@@ -272,6 +277,9 @@ async function loadPosition() {
   if (p.fully_credited.length)
     html += `<div class="note" style="margin-top:6px;">Fully credited (open 0.00): ` + p.fully_credited.map(f =>
       `${f.invoice_number} · face ${money(f.face)} − credits ${money(f.credits)}`).join(" · ") + `</div>`;
+  if (p.fully_paid && p.fully_paid.length)
+    html += `<div class="note" style="margin-top:6px;">Fully paid (open 0.00): ` + p.fully_paid.map(f =>
+      `${f.invoice_number} · face ${money(f.face)} − credits ${money(f.credits)} − paid ${money(f.paid)}`).join(" · ") + `</div>`;
   if (p.anomalies.length)
     html += `<p class="flag" style="margin-top:6px;">` + p.anomalies.map(a =>
       `${a.code}: ${a.invoice_number} open ${money(a.open)}`).join(" · ") + `</p>`;
@@ -322,18 +330,24 @@ async function showRecord(id) {
   if (r.credits_applied && r.credits_applied.length) {
     const face = r.extraction ? r.extraction.fields.total?.value : null;
     const appliedSum = r.credits_applied.reduce((s, c) => s + c.amount, 0);
+    const paidSum = (r.payments_applied || []).reduce((s, p) => s + p.amount, 0);
     html += `<h2 style="margin-top:14px;">Credits applied against this invoice</h2><table><thead><tr><th>Credit</th><th>Amount</th><th>Applied by</th></tr></thead><tbody>`
       + r.credits_applied.map(c => `<tr><td>${c.credit_number}</td><td>${money(c.amount)}</td><td>${c.actor}</td></tr>`).join("")
-      + `</tbody></table><p class="note">Face ${money(face)} − credits ${money(appliedSum)} = open <strong>${money((face ?? 0) - appliedSum)}</strong> — the figure the packet and the runs read. The face itself never changes.</p>`;
+      + `</tbody></table><p class="note">Face ${money(face)} − credits ${money(appliedSum)}${paidSum ? " − payments released " + money(paidSum) : ""} = open <strong>${money((face ?? 0) - appliedSum - paidSum)}</strong> — the figure the packet and the runs read. The face itself never changes.</p>`;
+  }
+  if (r.payments_applied && r.payments_applied.length) {
+    html += `<h2 style="margin-top:14px;">Payments released against this invoice</h2><table><thead><tr><th>Run</th><th>Amount</th><th>Released by</th></tr></thead><tbody>`
+      + r.payments_applied.map(p => `<tr><td>${p.run_id}</td><td>${money(p.amount)}</td><td>${p.actor}</td></tr>`).join("")
+      + `</tbody></table>`;
   }
   if (r.payment_run_id)
-    html += `<p class="note" style="margin-top:6px;">Payment: ${r.payment_state === "PAID_PROPOSED" ? "paid-proposed in released run" : "held in open run"} ${r.payment_run_id}</p>`;
+    html += `<p class="note" style="margin-top:6px;">Payment: ${r.payment_state === "PAID_PROPOSED" ? "paid-proposed in released run" : r.payment_state === "PART_PAID" ? "part-paid — most recent paying run" : "held in open run"} ${r.payment_run_id}</p>`;
   if (r.payment_confirmation)
     html += `<p class="note" style="margin-top:6px;">Bank confirmation: <strong>${r.payment_confirmation}</strong> — per ${r.payment_confirmation_id} (an overlay on the proposal; the approval above is untouched)</p>`;
   if (r.duplicate_hold) {
     const h = r.duplicate_hold;
     html += `<h2 style="margin-top:14px;">Paid-duplicate watch</h2>
-      <p class="flag">⚠ Invoice ${h.invoice_number} was already released for payment as ${h.original_record_id} in run ${h.payment_run_id} (released ${h.released_at} by ${h.released_by}) for <strong>${h.currency} ${money(h.amount_paid)}</strong>; this arrival states ${money(h.arrived_amount)} — the ${h.amount_basis} figure.</p>`;
+      <p class="flag">⚠ Invoice ${h.invoice_number} was already released for payment as ${h.original_record_id} — <strong>${h.currency} ${money(h.amount_paid)}</strong> instructed across released runs, most recently run ${h.payment_run_id} (released ${h.released_at} by ${h.released_by}); this arrival states ${money(h.arrived_amount)} — the ${h.amount_basis} figure.</p>`;
     if (h.resolution)
       html += `<p class="note">Resolution: ${h.resolution.action} by ${h.resolution.actor} — ${h.resolution.reason}</p>`;
     else
@@ -434,7 +448,7 @@ async function loadRuns() {
     let html = `<h2 style="margin-top:18px;">${run.run_id} — value date ${run.value_date}</h2>
       <p class="note">Status <span class="status st-${run.status}">${run.status}</span> · totals: ${totals}${run.currencies.length ? " · scope: " + run.currencies.join(", ") : ""}</p>`;
     html += `<table><thead><tr><th>Record</th><th>Supplier</th><th>Invoice</th><th>Currency</th><th>Amount (open)</th><th>Credits netted</th></tr></thead><tbody>`
-      + run.lines.map(l => `<tr><td>${l.record_id}</td><td>${l.supplier_name}</td><td>${l.invoice_number}</td><td>${l.currency}</td><td>${money(l.amount)}</td><td>${l.credits_applied && l.credits_applied.length ? "face " + money(l.gross_amount) + " − " + l.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", ") : "—"}</td></tr>`).join("")
+      + run.lines.map(l => `<tr><td>${l.record_id}</td><td>${l.supplier_name}</td><td>${l.invoice_number}</td><td>${l.currency}</td><td>${money(l.amount)}${l.open_amount && l.amount !== l.open_amount ? ` <span class="note">part of open ${money(l.open_amount)}</span>` : ""}</td><td>${l.credits_applied && l.credits_applied.length ? "face " + money(l.gross_amount) + " − " + l.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", ") : "—"}</td></tr>`).join("")
       + `</tbody></table>`;
     (run.refusals || []).forEach(rf =>
       html += `<p class="flag">Refused ${rf.record_id} — ${rf.code}: ${rf.reason}</p>`);
@@ -593,8 +607,8 @@ async function showLedger(supplierId) {
   if (l.bank.warning)
     html += `<p class="flag">⚠ Bank-change warning — ${l.bank.warning} (records: ${l.bank.flagged_record_ids.join(", ")}). Fraud is resolved in the master, out of band; the gate cannot clear it.</p>`;
   if (l.invoices.length) {
-    html += `<table><thead><tr><th>Invoice</th><th>Status</th><th>Face</th><th>Credits</th><th>Open</th><th>Match</th><th>Payment</th><th>Bank said</th><th>Ageing</th></tr></thead><tbody>`
-      + l.invoices.map(i => `<tr><td>${i.invoice_number}</td><td class="status st-${i.status}">${i.status}</td><td>${money(i.face)}</td><td>${i.credits_applied.length ? i.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", ") : "—"}</td><td><strong>${money(i.open)}</strong></td><td>${i.match_status || "—"}${i.exception_codes.length ? " (" + i.exception_codes.join(", ") + ")" : ""}</td><td>${i.payment_state ? i.payment_state + " · " + (i.payment_run_id || "") : "—"}</td><td>${i.payment_confirmation || "—"}</td><td>${i.bucket || (i.fully_credited ? "fully credited" : "—")}</td></tr>`).join("")
+    html += `<table><thead><tr><th>Invoice</th><th>Status</th><th>Face</th><th>Credits</th><th>Payments</th><th>Open</th><th>Match</th><th>Payment</th><th>Bank said</th><th>Ageing</th></tr></thead><tbody>`
+      + l.invoices.map(i => `<tr><td>${i.invoice_number}</td><td class="status st-${i.status}">${i.status}</td><td>${money(i.face)}</td><td>${i.credits_applied.length ? i.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", ") : "—"}</td><td>${i.payments_applied && i.payments_applied.length ? i.payments_applied.map(p => money(p.amount) + " in " + p.run_id).join(", ") : "—"}</td><td><strong>${money(i.open)}</strong></td><td>${i.match_status || "—"}${i.exception_codes.length ? " (" + i.exception_codes.join(", ") + ")" : ""}</td><td>${i.payment_state ? i.payment_state + " · " + (i.payment_run_id || "") : "—"}</td><td>${i.payment_confirmation || "—"}</td><td>${i.bucket || (i.fully_credited ? "fully credited" : "—")}</td></tr>`).join("")
       + `</tbody></table>`;
   } else html += `<p class="note">No invoices on file for this supplier.</p>`;
   const heldInvoices = l.invoices.filter(i => i.duplicate_hold);
@@ -602,7 +616,7 @@ async function showLedger(supplierId) {
     html += `<h2 style="margin-top:14px;">Paid-duplicate holds</h2>` + heldInvoices.map(i => {
       const h = i.duplicate_hold;
       const ruling = h.resolution ? ` — resolved ${h.resolution.action} by ${h.resolution.actor}: ${h.resolution.reason}` : " — unresolved; the gate cannot decide it";
-      return `<p class="flag">⚠ ${i.invoice_number} (${i.record_id}): already released for payment as ${h.original_record_id} in run ${h.payment_run_id} for ${h.currency} ${money(h.amount_paid)}; this arrival states ${money(h.arrived_amount)} — the ${h.amount_basis} figure${ruling}</p>`;
+      return `<p class="flag">⚠ ${i.invoice_number} (${i.record_id}): already released for payment as ${h.original_record_id} — ${h.currency} ${money(h.amount_paid)} instructed across released runs, most recently run ${h.payment_run_id}; this arrival states ${money(h.arrived_amount)} — the ${h.amount_basis} figure${ruling}</p>`;
     }).join("");
   if (l.credits.length)
     html += `<h2 style="margin-top:14px;">Credit notes</h2>` + l.credits.map(c =>

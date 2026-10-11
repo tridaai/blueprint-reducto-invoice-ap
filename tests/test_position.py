@@ -182,6 +182,7 @@ def test_state_split_separates_the_money_and_foots(service):
     states = report.state_totals_by_currency["USD"]
     assert states == {
         "OPEN_FREE": 100.0, "IN_RUN": 200.0, "PAID_PROPOSED": 300.0,
+        "PART_PAID": 0.0,
     }
     assert sum(states.values()) == report.open_totals_by_currency["USD"]
     assert report.splits_agree is True

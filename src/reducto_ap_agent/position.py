@@ -20,15 +20,22 @@ record store:
   silently bucketed by an age it does not carry.
 - **One open-amount rule.** Every figure here comes from
   ``credits.open_amount`` — face minus the applied-credit
-  ledger — the same computation the packet and the payment
-  runs read. The position never recomputes it differently;
-  a second definition of "open" is how subledgers drift.
+  ledger minus the payments already released — the same
+  computation the packet and the payment runs read. The
+  position never recomputes it differently; a second
+  definition of "open" is how subledgers drift.
 - **The state of the money is a second split of the same
   total.** Each aged line is OPEN_FREE, IN_RUN (held by an
-  open payment run), or PAID_PROPOSED (released, awaiting the
-  bank's confirmation). The state columns and the ageing
-  columns are two readings of one figure and must both foot
-  to it — the report checks that itself (``splits_agree``).
+  open payment run), or PART_PAID (released runs have
+  instructed part of it; the line ages only the remainder,
+  at the invoice's due date — paid money does not age).
+  Beside the open split, each line and row carries the memo
+  figure the open was reduced by: the cumulative PAID total
+  from the same payments ledger, so a row reads face −
+  credits − paid = open in one glance. The state columns and
+  the ageing columns are two readings of one open figure and
+  must both foot to it — the report checks that itself
+  (``splits_agree``).
 - **The tie-out.** The packet is not as-of parameterised, so
   the position computes BOTH totals from the same record set
   in this one pass: the packet total by the packet's own
@@ -48,7 +55,12 @@ record store:
   listed beside the position with its flags. Fully credited
   invoices (open exactly zero) are listed too — they owe
   nothing and age nothing, and the close should see the
-  cover happened.
+  cover happened. Fully paid invoices (open exactly zero,
+  reached by released instructions) are listed the same way,
+  with the cumulative the runs instructed: the close should
+  see the payment happened, and the report's paid totals —
+  the aged lines' paid figures plus the fully paid list —
+  are the whole of the money the runs have instructed.
 """
 
 from __future__ import annotations
@@ -57,13 +69,14 @@ import csv
 import io
 from datetime import date
 
-from .credits import open_amount
+from .credits import open_amount, paid_amount
 from .policy import AGEING_BUCKETS, DEFAULT_AGEING, AgeingPolicy
 from .schemas import (
     CurrencyTie,
     DocumentRecord,
     FraudHeldLine,
     FullyCreditedLine,
+    FullyPaidLine,
     PositionAnomaly,
     PositionLine,
     PositionReport,
@@ -71,7 +84,10 @@ from .schemas import (
 )
 
 _STATE_BY_PAYMENT_STATE = {None: "OPEN_FREE", "IN_RUN": "IN_RUN",
-                           "PAID_PROPOSED": "PAID_PROPOSED"}
+                           "PAID_PROPOSED": "PAID_PROPOSED",
+                           "PART_PAID": "PART_PAID"}
+
+_STATE_COLUMNS = ("OPEN_FREE", "IN_RUN", "PAID_PROPOSED", "PART_PAID")
 
 
 def _cents(amount: float) -> float:
@@ -115,6 +131,10 @@ def _credits(record: DocumentRecord) -> float:
     return _cents(sum(entry.amount for entry in record.credits_applied))
 
 
+def _paid(record: DocumentRecord) -> float:
+    return paid_amount(record)
+
+
 def build_position(
     records: list[DocumentRecord],
     as_of: str,
@@ -128,6 +148,7 @@ def build_position(
     suppliers: dict[tuple[str, str, str], SupplierPosition] = {}
     fraud_held: list[FraudHeldLine] = []
     fully_credited: list[FullyCreditedLine] = []
+    fully_paid: list[FullyPaidLine] = []
     anomalies: list[PositionAnomaly] = []
 
     for record in records:
@@ -161,19 +182,32 @@ def build_position(
                 currency=currency,
                 face=_face(record),
                 credits=_credits(record),
+                paid=_paid(record),
                 open=open_now,
                 detail=(
-                    f"applied credits of {_credits(record):.2f} exceed the "
+                    f"applied credits of {_credits(record):.2f} and "
+                    f"released payments of {_paid(record):.2f} exceed the "
                     f"approved face of {_face(record):.2f} — application "
-                    "refuses over-credit, so this ledger could only have "
-                    "been written outside the credit path; the record is "
-                    "kept out of the ageing and the difference breaks "
+                    "refuses over-credit and assembly refuses an "
+                    "over-committed part, so these ledgers could only "
+                    "have been written outside those paths; the record "
+                    "is kept out of the ageing and the difference breaks "
                     "the tie until the record is repaired"
                 ),
             ))
             continue
         if open_now == 0:
-            if record.credits_applied:
+            if _paid(record) > 0:
+                fully_paid.append(FullyPaidLine(
+                    record_id=record.record_id,
+                    supplier_name=record.supplier_name,
+                    invoice_number=invoice_number,
+                    currency=currency,
+                    face=_face(record),
+                    credits=_credits(record),
+                    paid=_paid(record),
+                ))
+            elif record.credits_applied:
                 fully_credited.append(FullyCreditedLine(
                     record_id=record.record_id,
                     supplier_name=record.supplier_name,
@@ -199,6 +233,7 @@ def build_position(
             currency=currency,
             face=_face(record),
             credits=_credits(record),
+            paid=_paid(record),
             open=open_now,
             invoice_date=str(record.extraction.value("invoice_date") or ""),
             due_date=str(due_raw).strip() if due_raw else "",
@@ -215,8 +250,7 @@ def build_position(
                 supplier_name=record.supplier_name,
                 currency=currency,
                 bucket_totals={name: 0.0 for name in AGEING_BUCKETS},
-                state_totals={"OPEN_FREE": 0.0, "IN_RUN": 0.0,
-                              "PAID_PROPOSED": 0.0},
+                state_totals={name: 0.0 for name in _STATE_COLUMNS},
             )
             suppliers[key] = supplier
         supplier.lines.append(line)
@@ -226,6 +260,7 @@ def build_position(
             supplier.state_totals[line.state] + open_now)
         supplier.face_total = _cents(supplier.face_total + line.face)
         supplier.credits_total = _cents(supplier.credits_total + line.credits)
+        supplier.paid_total = _cents(supplier.paid_total + line.paid)
         supplier.open_total = _cents(supplier.open_total + open_now)
 
     supplier_rows = sorted(
@@ -239,6 +274,7 @@ def build_position(
     bucket_totals: dict[str, dict[str, float]] = {}
     state_totals: dict[str, dict[str, float]] = {}
     open_totals: dict[str, float] = {}
+    paid_totals: dict[str, float] = {}
     for supplier in supplier_rows:
         cur = supplier.currency
         bt = bucket_totals.setdefault(
@@ -246,11 +282,19 @@ def build_position(
         for name, amount in supplier.bucket_totals.items():
             bt[name] = _cents(bt[name] + amount)
         st = state_totals.setdefault(
-            cur, {"OPEN_FREE": 0.0, "IN_RUN": 0.0, "PAID_PROPOSED": 0.0})
+            cur, {name: 0.0 for name in _STATE_COLUMNS})
         for name, amount in supplier.state_totals.items():
             st[name] = _cents(st[name] + amount)
         open_totals[cur] = _cents(open_totals.get(cur, 0.0)
                                   + supplier.open_total)
+        paid_totals[cur] = _cents(paid_totals.get(cur, 0.0)
+                                  + supplier.paid_total)
+    for paid_line in fully_paid:
+        # The fully paid list is the other half of the paid
+        # story: aged lines carry the paid figures of invoices
+        # still partly open; these carry the rest.
+        paid_totals[paid_line.currency] = _cents(
+            paid_totals.get(paid_line.currency, 0.0) + paid_line.paid)
 
     ties: list[CurrencyTie] = []
     for currency in sorted(set(packet_totals) | set(open_totals)):
@@ -284,6 +328,7 @@ def build_position(
         bucket_totals_by_currency=bucket_totals,
         state_totals_by_currency=state_totals,
         open_totals_by_currency=open_totals,
+        paid_totals_by_currency=paid_totals,
         ties=ties,
         tie_status="TIED" if all(t.tied for t in ties)
         else "POSITION_TIE_BREAK",
@@ -292,6 +337,9 @@ def build_position(
         fraud_held_totals_by_currency=fraud_totals,
         fully_credited=sorted(
             fully_credited,
+            key=lambda f: (f.supplier_name, f.invoice_number)),
+        fully_paid=sorted(
+            fully_paid,
             key=lambda f: (f.supplier_name, f.invoice_number)),
         anomalies=anomalies,
         splits_agree=splits_agree,
@@ -326,23 +374,24 @@ def position_csv(report: PositionReport) -> bytes:
     writer.writerow(["Tie status", report.tie_status])
     writer.writerow([])
     writer.writerow([
-        "Supplier", "Currency", "Face", "Credits applied", "Open",
+        "Supplier", "Currency", "Face", "Credits applied",
+        "Payments released", "Open",
         "CURRENT", "1-30", "31-60", "61-90", "90+", "UNDATED",
-        "OPEN_FREE", "IN_RUN", "PAID_PROPOSED",
+        "OPEN_FREE", "IN_RUN", "PAID_PROPOSED", "PART_PAID",
     ])
     for s in report.suppliers:
         writer.writerow([
             s.supplier_name, s.currency, f"{s.face_total:.2f}",
-            f"{s.credits_total:.2f}", f"{s.open_total:.2f}",
+            f"{s.credits_total:.2f}", f"{s.paid_total:.2f}",
+            f"{s.open_total:.2f}",
             *(f"{s.bucket_totals[name]:.2f}" for name in AGEING_BUCKETS),
-            *(f"{s.state_totals[name]:.2f}"
-              for name in ("OPEN_FREE", "IN_RUN", "PAID_PROPOSED")),
+            *(f"{s.state_totals[name]:.2f}" for name in _STATE_COLUMNS),
         ])
     writer.writerow([])
     writer.writerow([
         "Record", "Supplier", "Invoice", "Currency", "Due date",
         "Days past due", "Bucket", "State", "Payment run", "Face",
-        "Credits applied", "Open",
+        "Credits applied", "Payments released", "Open",
     ])
     for s in report.suppliers:
         for line in s.lines:
@@ -352,7 +401,7 @@ def position_csv(report: PositionReport) -> bytes:
                 "" if line.days_past_due is None else line.days_past_due,
                 line.bucket, line.state, line.payment_run_id or "",
                 f"{line.face:.2f}", f"{line.credits:.2f}",
-                f"{line.open:.2f}",
+                f"{line.paid:.2f}", f"{line.open:.2f}",
             ])
     writer.writerow([])
     writer.writerow(["TIE-OUT", "Currency", "Packet open total",
@@ -382,16 +431,28 @@ def position_csv(report: PositionReport) -> bytes:
                 line.record_id, line.supplier_name, line.invoice_number,
                 line.currency, f"{line.face:.2f}", f"{line.credits:.2f}",
             ])
+    if report.fully_paid:
+        writer.writerow([])
+        writer.writerow(["FULLY PAID (open 0.00)", "Supplier",
+                         "Invoice", "Currency", "Face", "Credits applied",
+                         "Payments released"])
+        for line in report.fully_paid:
+            writer.writerow([
+                line.record_id, line.supplier_name, line.invoice_number,
+                line.currency, f"{line.face:.2f}", f"{line.credits:.2f}",
+                f"{line.paid:.2f}",
+            ])
     if report.anomalies:
         writer.writerow([])
         writer.writerow(["ANOMALIES", "Record", "Supplier", "Invoice",
-                         "Currency", "Face", "Credits applied", "Open",
-                         "Code"])
+                         "Currency", "Face", "Credits applied",
+                         "Payments released", "Open", "Code"])
         for anomaly in report.anomalies:
             writer.writerow([
                 "", anomaly.record_id, anomaly.supplier_name,
                 anomaly.invoice_number, anomaly.currency,
                 f"{anomaly.face:.2f}", f"{anomaly.credits:.2f}",
+                f"{anomaly.paid:.2f}",
                 f"{anomaly.open:.2f}", anomaly.code,
             ])
     return out.getvalue().encode("utf-8")

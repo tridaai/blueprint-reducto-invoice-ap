@@ -25,9 +25,12 @@ the supplier's page. This module is that page, as a read model:
   problem the pipeline never claimed to solve.
 - **Every figure traces to its record, computed once.** Face
   is the extraction total; credits are the invoice's own
-  ``credits_applied`` ledger; open is ``credits.open_amount``
-  — the one computation the packet, the runs, and the position
-  already read. The ledger recomputes nothing in its own way.
+  ``credits_applied`` ledger; payments are its
+  ``payments_applied`` ledger — the parts released runs have
+  instructed, in one run or several; open is
+  ``credits.open_amount`` — face minus both ledgers, the one
+  computation the packet, the runs, and the position already
+  read. The ledger recomputes nothing in its own way.
 - **The totals tie to the position.** The ledger is all-time —
   the whole relationship has no as-of — but its payable totals
   are taken in the position's own universe: every APPROVED
@@ -74,6 +77,7 @@ from .credits import (
     credit_amount,
     credited_invoice_number,
     open_amount,
+    paid_amount,
     unapplied_reason,
 )
 from .position import build_position
@@ -199,6 +203,7 @@ def build_ledger(
         face = _cents(float(record.extraction.value("total") or 0.0))
         credits_total = _cents(
             sum(entry.amount for entry in record.credits_applied))
+        paid_total = paid_amount(record)
         open_now = open_amount(record)
         line = aged.get(record.record_id)
         invoices.append(LedgerInvoice(
@@ -209,6 +214,8 @@ def build_ledger(
             face=face,
             credits_applied=list(record.credits_applied),
             credits_total=credits_total,
+            payments_applied=list(record.payments_applied),
+            paid_total=paid_total,
             open=open_now,
             match_status=record.match.status if record.match else None,
             exception_codes=(
@@ -231,6 +238,8 @@ def build_ledger(
                 bucket_totals.face_total + face)
             bucket_totals.credits_total = _cents(
                 bucket_totals.credits_total + credits_total)
+            bucket_totals.paid_total = _cents(
+                bucket_totals.paid_total + paid_total)
             bucket_totals.open_total = _cents(
                 bucket_totals.open_total + open_now)
 
