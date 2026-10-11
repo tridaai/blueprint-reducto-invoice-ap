@@ -58,6 +58,10 @@
   .rc-matched { color: var(--ok); font-weight: 600; }
   .rc-amount_disagrees, .rc-duplicates_within_statement { color: var(--warn); font-weight: 600; }
   .rc-missing_in_ap, .rc-missing_on_statement { color: var(--bad); font-weight: 600; }
+  .st-UNMATCHED { color: var(--warn); }
+  .cf-paid_as_proposed { color: var(--ok); font-weight: 600; }
+  .cf-short_paid, .cf-over_paid { color: var(--warn); font-weight: 600; }
+  .cf-missing, .cf-unexpected_line { color: var(--bad); font-weight: 600; }
   button {
     background: var(--indigo); color: #fff; border: 0; border-radius: 999px;
     padding: 8px 16px; font-weight: 700; cursor: pointer; font-size: 13.5px;
@@ -133,6 +137,14 @@
     </div>
     <p class="note" id="run-error"></p>
     <div id="run-list" class="note">No payment runs yet.</div>
+  </section>
+</div>
+<div style="padding: 0 28px 8px;">
+  <section>
+    <h2>Remittance confirmation</h2>
+    <p class="note" style="margin-top:0;">A released run is a proposal. The bank answers it with a remittance advice, and confirmation reconciles that answer line by line — exactly, never within a tolerance: paid as proposed, short, over, missing, or a line for an invoice the run never contained. An advice that names no run on file is held unmatched, never guessed onto one. Confirmation is evidence; it changes no run, no export, and no approval.</p>
+    <div id="confirm-advices" class="note">No remittance advices yet — load the demo world.</div>
+    <div id="confirm-list"></div>
   </section>
 </div>
 <footer>
@@ -226,6 +238,12 @@ async function showRecord(id) {
     html += `<p class="note" style="margin-top:10px;">Gate: ${r.decision.decision} by ${r.decision.actor}${r.decision.reason ? " — " + r.decision.reason : ""}</p>`;
   if (r.payment_run_id)
     html += `<p class="note" style="margin-top:6px;">Payment: ${r.payment_state === "PAID_PROPOSED" ? "paid-proposed in released run" : "held in open run"} ${r.payment_run_id}</p>`;
+  if (r.payment_confirmation)
+    html += `<p class="note" style="margin-top:6px;">Bank confirmation: <strong>${r.payment_confirmation}</strong> — per ${r.payment_confirmation_id} (an overlay on the proposal; the approval above is untouched)</p>`;
+  if (r.extraction && r.extraction.remittance_lines && r.extraction.remittance_lines.length)
+    html += `<h2 style="margin-top:14px;">Remittance paid lines</h2><table><thead><tr><th>Invoice</th><th>Paid</th><th>Currency</th><th>Value date</th><th>Bank ref</th></tr></thead><tbody>`
+      + r.extraction.remittance_lines.map(l => `<tr><td>${l.invoice_number}</td><td>${money(l.amount_paid)}</td><td>${l.currency}</td><td>${l.value_date}</td><td>${l.bank_reference}</td></tr>`).join("")
+      + `</tbody></table><p class="note">Names payment run ${r.extraction.fields.payment_run_id?.value || "— (none)"}. Confirm it below to reconcile it against that run.</p>`;
   if (r.status === "AWAITING_APPROVER") {
     html += `<div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap;">
       <input id="actor" placeholder="Approver name (required)">
@@ -349,6 +367,66 @@ async function loadRuns() {
   });
 }
 
+async function loadConfirmations() {
+  const records = await api("/records");
+  const advices = records.filter(r => r.doc_class === "remittance_advice");
+  const host = $("confirm-advices");
+  if (!advices.length) {
+    host.innerHTML = "No remittance advices yet — load the demo world.";
+  } else {
+    host.innerHTML = advices.map(r => {
+      const n = r.extraction ? r.extraction.remittance_lines.length : 0;
+      const runRef = r.extraction ? (r.extraction.fields.payment_run_id?.value || "no run named") : "not captured";
+      return `<div style="margin-bottom:6px;">${r.record_id} · ${n} paid lines · answers: ${runRef}
+        <button class="secondary" data-confirm="${r.record_id}">Confirm</button></div>`;
+    }).join("");
+    host.querySelectorAll("button[data-confirm]").forEach(b =>
+      b.addEventListener("click", async () => {
+        await api("/remittances/" + b.dataset.confirm + "/confirm", {method: "POST"});
+        await loadConfirmations(); await loadRecords();
+      }));
+  }
+  const confirmations = await api("/confirmations");
+  $("confirm-list").innerHTML = confirmations.map(cf => {
+    const counts = Object.entries(cf.counts).filter(([, n]) => n > 0)
+      .map(([k, n]) => `${k} ${n}`).join(" · ");
+    let html = `<h2 style="margin-top:18px;">${cf.confirmation_id} — ${cf.run_id ? "answers " + cf.run_id : "held unmatched"} · advice ${cf.advice_record_id}</h2>
+      <p class="note">Status <span class="status st-${cf.status}">${cf.status}</span>${cf.run_id ? ` · totals tie: ${cf.totals_tie ? "yes" : "NO"} · ${counts}` : ""}</p>`;
+    if (cf.unmatched_reason) html += `<p class="flag">⚠ Held unmatched: ${cf.unmatched_reason}</p>`;
+    (cf.flags || []).forEach(f => html += `<p class="flag">⚠ ${f}</p>`);
+    (cf.notes || []).forEach(n => html += `<p class="note">${n}</p>`);
+    if (cf.lines.length)
+      html += `<table><thead><tr><th>Invoice</th><th>Class</th><th>Proposed</th><th>Paid</th><th>Bank ref</th><th>Note</th></tr></thead><tbody>`
+        + cf.lines.map(l => `<tr><td>${l.invoice_number}</td><td class="cf-${l.classification}">${l.classification}</td><td>${money(l.proposed_amount)}</td><td>${money(l.paid_amount)}</td><td>${l.bank_reference || "—"}</td><td class="note">${l.note}</td></tr>`).join("")
+        + `</tbody></table>`;
+    (cf.totals || []).forEach(t =>
+      html += `<p class="note" style="margin-top:6px;">${t.currency}: run ${money(t.run_total)} · confirmed ${money(t.confirmed_paid)} · shortfall ${money(t.shortfall)} · excess ${money(t.excess)} · missing ${money(t.missing_proposed)} · unexpected ${money(t.unexpected_paid)}</p>`);
+    if (cf.decision)
+      html += `<p class="note" style="margin-top:8px;">Controller: ${cf.decision.decision} by ${cf.decision.actor}${cf.decision.note ? " — " + cf.decision.note : ""}</p>`;
+    if (cf.status === "AWAITING_CONTROLLER")
+      html += `<div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <input id="cf-actor-${cf.confirmation_id}" placeholder="Controller name (required)">
+        <input id="cf-note-${cf.confirmation_id}" placeholder="Note (required to flag back)">
+        <button data-cf-accept="${cf.confirmation_id}">Accept</button>
+        <button class="secondary" data-cf-flagback="${cf.confirmation_id}">Flag back</button></div>
+        <p class="note" id="cf-error-${cf.confirmation_id}"></p>`;
+    return html;
+  }).join("");
+  document.querySelectorAll("button[data-cf-accept], button[data-cf-flagback]").forEach(b => {
+    const id = b.dataset.cfAccept || b.dataset.cfFlagback;
+    const action = b.dataset.cfAccept ? "accept" : "flag_back";
+    b.addEventListener("click", async () => {
+      try {
+        await api(`/confirmations/${id}/decision`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({action, actor: $("cf-actor-" + id).value, note: $("cf-note-" + id).value}),
+        });
+        await loadConfirmations();
+      } catch (e) { $("cf-error-" + id).textContent = e.message; }
+    });
+  });
+}
+
 $("create-run").addEventListener("click", async () => {
   $("run-error").textContent = "";
   const currencies = $("run-currencies").value.split(",").map(s => s.trim()).filter(Boolean);
@@ -361,10 +439,10 @@ $("create-run").addEventListener("click", async () => {
   } catch (e) { $("run-error").textContent = e.message; }
 });
 
-$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); });
-$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); });
+$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); });
+$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); });
 $("status-filter").addEventListener("change", loadRecords);
-readiness(); loadRecords(); loadRecons(); loadRuns();
+readiness(); loadRecords(); loadRecons(); loadRuns(); loadConfirmations();
 </script>
 </body>
 </html>

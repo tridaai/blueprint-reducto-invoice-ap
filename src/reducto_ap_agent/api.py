@@ -64,6 +64,12 @@ class TreasurerDecisionRequest(BaseModel):
     reason: str = ""
 
 
+class ConfirmationDecisionRequest(BaseModel):
+    action: str  # "accept" | "flag_back"
+    actor: str
+    note: str = ""
+
+
 def create_app(service: ApService | None = None) -> FastAPI:
     load_dotenv()
     configure_json_logging()
@@ -238,6 +244,27 @@ def create_app(service: ApService | None = None) -> FastAPI:
                     f'attachment; filename="{run_id}-payment-instructions.csv"'
             },
         )
+
+    @app.post("/remittances/{record_id}/confirm", status_code=201)
+    def confirm_remittance(record_id: str) -> dict:
+        return svc().confirm_remittance(record_id).model_dump()
+
+    @app.get("/confirmations")
+    def list_confirmations(run_id: str | None = None) -> list[dict]:
+        return [c.model_dump() for c in svc().list_confirmations(run_id=run_id)]
+
+    @app.get("/confirmations/{confirmation_id}")
+    def get_confirmation(confirmation_id: str) -> dict:
+        return svc().get_confirmation(confirmation_id).model_dump()
+
+    @app.post("/confirmations/{confirmation_id}/decision")
+    def decide_confirmation(
+        confirmation_id: str, request: ConfirmationDecisionRequest
+    ) -> dict:
+        confirmation = svc().decide_confirmation(
+            confirmation_id, request.action, request.actor, request.note
+        )
+        return confirmation.model_dump()
 
     @app.get("/suppliers")
     def suppliers() -> list[dict]:

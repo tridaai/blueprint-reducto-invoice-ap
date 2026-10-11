@@ -19,6 +19,11 @@ The statement cases plant the reconciliation breaks: one
 statement carrying a matched line, a disagreement, an invoice
 AP never received, a duplicated line, and an omission — and one
 statement that agrees with AP to the cent.
+
+The remittance cases plant the confirmation holds: an advice
+naming no payment run, and one naming a run that is not on
+file. The advice that answers a real run is built per scenario
+— a run's id exists only once a batch is assembled.
 """
 
 from __future__ import annotations
@@ -114,6 +119,40 @@ def _statement_doc(supplier: Supplier, statement_date: str, period: str,
     ]
     out += [f"{number} | {date} | {currency} | {amount:.2f}" for number, date, amount in rows]
     out.append(f"Total: {total:.2f}")
+    return "\n".join(out) + "\n"
+
+
+def remittance_advice_doc(
+    run_id: str | None,
+    rows: list[tuple[str, float, str, str, str]],
+    advice_date: str = "2026-10-19",
+) -> str:
+    """A remittance advice in the text-layer format: the run it
+    answers (when it names one), then one paid row per line the
+    bank reports — ``number | amount paid | currency | value
+    date | bank reference``.
+
+    The run-answering advice cannot be planted statically — a
+    run's id exists only once a treasurer's batch is assembled
+    — so the eval pack, the tests, and the demo build theirs
+    with this helper against the run they created. What IS
+    planted statically (SUB-022, SUB-023) are the advices whose
+    gold does not depend on a run: one naming no run at all,
+    one naming a run that is not on file. Both must be held
+    UNMATCHED, with the reason named."""
+    out = [
+        "=== PAGE 1 ===",
+        "[DOCUMENT: REMITTANCE ADVICE]",
+    ]
+    if run_id:
+        out.append(f"Payment Run: {run_id}")
+    out.append(f"Advice Date: {advice_date}")
+    out.append("Lines:")
+    out.append("Invoice | Amount Paid | Currency | Value Date | Bank Reference")
+    out += [
+        f"{number} | {amount:.2f} | {currency} | {value_date} | {bank_ref}"
+        for number, amount, currency, value_date, bank_ref in rows
+    ]
     return "\n".join(out) + "\n"
 
 
@@ -259,5 +298,21 @@ def build_world() -> World:
         ("INV-1015", "2026-09-14", 1150.00),
     ], total=2160.00),
         [ExpectedDoc("statement", "REFUSED")])
+
+    # -- the remittance world ----------------------------------
+    # Two advices whose gold is static: one names no payment run
+    # anywhere — confirmation must hold it UNMATCHED rather than
+    # guess which batch the bank meant — and one names a run id
+    # that is not on file. The advice that answers a real run is
+    # built per scenario (see remittance_advice_doc): the run it
+    # answers only has an id once a run is assembled.
+    add("SUB-022", remittance_advice_doc(None, [
+        ("INV-1001", 1400.00, "USD", "2026-10-16", "BNK-2026-2201"),
+    ]),
+        [ExpectedDoc("remittance_advice", "RECEIVED")])
+    add("SUB-023", remittance_advice_doc("RUN-2099-01-99", [
+        ("INV-1002", 1010.00, "USD", "2026-10-16", "BNK-2026-2202"),
+    ]),
+        [ExpectedDoc("remittance_advice", "RECEIVED")])
 
     return World(suppliers=suppliers, purchase_orders=purchase_orders, receipts=receipts, submissions=subs)

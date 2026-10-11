@@ -11,14 +11,18 @@ nothing — and finally a payment run: the approved records
 assembled for a value date, the fraud hold and the exception
 refused by name when they are (mistakenly) asked for, and a
 treasurer releasing the batch into a bank-instruction export
-that still, itself, pays no one.
+that still, itself, pays no one — and finally the bank's
+answer: a remittance advice naming the released run, reconciled
+line by line in code, with the shorts, the overpayment, the
+unaccounted members, and one line for an invoice the run never
+contained, all itemised for a controller.
 """
 
 from __future__ import annotations
 
 from langgraph.checkpoint.memory import MemorySaver
 
-from .datasets import build_world
+from .datasets import build_world, remittance_advice_doc
 from .graph import ApPipeline
 from .object_store import InMemoryObjectStore
 from .offline_docs import OfflineDocumentAdapter
@@ -132,6 +136,44 @@ def run_demo() -> ApService:
     print("    …")
     print("\nThe export is a file for the customer's payment systems. "
           "This system has still paid nothing.")
+
+    print("\nRemittance confirmation — the bank answers the run:")
+    advice_text = remittance_advice_doc(run.run_id, [
+        ("INV-1001", 1400.00, "USD", "2026-10-16", "BNK-2026-3101"),  # exact
+        ("INV-1002", 1000.00, "USD", "2026-10-16", "BNK-2026-3102"),  # short 10.00
+        ("CN-1001", -200.00, "USD", "2026-10-16", "BNK-2026-3103"),   # exact
+        ("INV-1010", 650.00, "USD", "2026-10-17", "BNK-2026-3104"),   # over 50.00
+        ("INV-1013", 1080.00, "EUR", "2026-10-17", "BNK-2026-3105"),  # exact
+        ("INV-9999", 123.00, "USD", "2026-10-17", "BNK-2026-3106"),   # not a member
+        # INV-1014, INV-2001, INV-2002, INV-2003: no line — missing.
+    ])
+    (advice_record,) = service.submit(
+        "SUB-024", "sub-024.pdf", advice_text.encode("utf-8"), "text/plain",
+    )
+    confirmation = service.confirm_remittance(advice_record.record_id)
+    counts = ", ".join(
+        f"{name} {n}" for name, n in confirmation.counts.items() if n
+    )
+    print(f"\n{confirmation.confirmation_id} — answers {confirmation.run_id} "
+          f"via advice {advice_record.record_id} — {confirmation.status}")
+    print(f"  totals tie: {'yes' if confirmation.totals_tie else 'NO'} · {counts}")
+    for line in confirmation.lines:
+        proposed = f"{line.proposed_amount:.2f}" if line.proposed_amount is not None else "—"
+        paid = f"{line.paid_amount:.2f}" if line.paid_amount is not None else "—"
+        print(f"  {line.invoice_number:<9} {line.classification:<18} "
+              f"proposed {proposed:>9} · paid {paid:>9} {line.currency}")
+    for row in confirmation.totals:
+        print(f"  {row.currency}: run {row.run_total:.2f} · confirmed "
+              f"{row.confirmed_paid:.2f} · shortfall {row.shortfall:.2f} · "
+              f"excess {row.excess:.2f} · missing {row.missing_proposed:.2f} · "
+              f"unexpected {row.unexpected_paid:.2f}")
+    decided = service.decide_confirmation(
+        confirmation.confirmation_id, "accept", "Marta Chen (controller)",
+        "demo: breaks noted for follow-up with the bank",
+    )
+    print(f"  → {decided.status} by Marta Chen (controller)")
+    print("\nThe confirmation is evidence over the run. The run, its "
+          "export, and every approval above are exactly as they were.")
     return service
 
 
