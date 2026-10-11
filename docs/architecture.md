@@ -243,10 +243,12 @@ applying the other half twice. Partial *coverage* is the
 normal case and accumulates on the ledger.
 
 **Open amount.** `open_amount(record)` = extraction total −
-Σ ledger. The face never changes (the approver's figure is
+Σ credit ledger − Σ payments ledger (`paid_amount`, also in
+`credits.py`). The face never changes (the approver's figure is
 history); the open amount is the derived figure the packet,
-the runs, and the export read — one computation, in
-`credits.py`, reused by all three, the way round 3 reused the
+the runs, the position, the ledger, and the export read — one
+computation, in
+`credits.py`, reused by all of them, the way round 3 reused the
 packet's amounts before it.
 
 **Late credits.** The target's payment state is a hard
@@ -254,7 +256,13 @@ boundary, checked before the money: `TARGET_IN_RUN` (the open
 run was assembled on the open amount at assembly time; it is
 returned or released as assembled) and `TARGET_PAID_PROPOSED`
 (terminal — the run and its confirmation own that money's
-story, and a later reduction would falsify both). The credit
+story, and a later reduction would falsify both). A
+`PART_PAID` target is neither: the released part's story is
+closed, but the remainder is still open money, so the credit
+falls through to the money check and lands on the remainder —
+and `OVER_CREDIT` is then judged against the remainder, its
+reason naming credits *and* payments already on the record
+when payments exist. The credit
 stays `UNAPPLIED` and visible; settling it against the
 supplier's future invoices is a credit-balance ledger this
 blueprint deliberately does not build.
@@ -355,12 +363,19 @@ candidate is either a member or a named refusal:
 - `ALREADY_PAID_PROPOSED` — released in an earlier run, also
   named; this refusal is forever, because the record already
   sits in a bank export;
-- `OUT_OF_CURRENCY_SCOPE` — outside the run's currency scope.
+- `OUT_OF_CURRENCY_SCOPE` — outside the run's currency scope;
+- `INVALID_PART_AMOUNT` — a stated part of zero or less (see
+  **Partial payments** below);
+- `PART_EXCEEDS_OPEN` — a stated part beyond the record's
+  open amount, with the part, the remainder, and the released
+  cumulative in the reason.
 
 Zero eligible records fails assembly (`PaymentRunError`, 422):
 an empty batch is an operator error, not a run. Member amounts
 are the packet's amounts — the open amount, face minus applied
-credits, with the credits listed on the member line — and the
+credits minus released payments, with the credits listed on the
+member line — or a stated part of that amount, carried on the
+line beside the full open figure it was taken from; and the
 per-currency totals are tied back against the member lines
 before the run is stored; a batch whose header disagrees with
 its contents is never written. The export therefore instructs
@@ -371,10 +386,15 @@ net figures, and its total is the net sum by construction.
 treasurer's batch does not rewrite another human's act.
 Membership rides the record as `payment_run_id` +
 `payment_state`: `IN_RUN` while held by an open run,
-`PAID_PROPOSED` once its run is released. *Paid-proposed*, not
-paid: the state names exactly what happened — a proposal for
-this payment exists in a released export. Both transitions are
-audit events on the record.
+`PAID_PROPOSED` once its run is released at the member's full
+open amount, and `PART_PAID` when the release covered only
+part of it — the record then also carries a `payments_applied`
+ledger (run, amount, currency, treasurer, moment), written
+only by the release path from the run's lines, from which the
+resting state after any later return is recomputed.
+*Paid-proposed*, not paid: the state names exactly what
+happened — a proposal for this payment exists in a released
+export. All transitions are audit events on the record.
 
 **The treasurer gate.** `AWAITING_TREASURER` → `RELEASED` |
 `RETURNED`, decided by a named treasurer; returning requires
@@ -564,15 +584,23 @@ or unreadable due date yields the `UNDATED` bucket with
 still owed; it simply does not pretend to an age.
 
 The state split reads `payment_state` off the same records
-(`None` → `OPEN_FREE`, `IN_RUN`, `PAID_PROPOSED`) and must
+(`None` → `OPEN_FREE`, `IN_RUN`, `PAID_PROPOSED`,
+`PART_PAID`) and must
 foot to the open total exactly as the bucket split does;
-`splits_agree` is the report checking itself. Fraud-held
+`splits_agree` is the report checking itself. A `PART_PAID`
+line ages only its remainder; the cumulative paid figure
+rides it as a memo and never enters the ageing, because paid
+money is not owed. Fraud-held
 invoices are deliberately outside both totals: the packet
 excludes them, so including them would break the tie by
 design rather than by defect — they are carried as a
 disclosed section with their flags and their own totals.
 Fully credited invoices (open exactly zero, non-empty
-ledger) are carried the same way: visible, zero-weighted.
+ledger) are carried the same way: visible, zero-weighted —
+and so are fully paid ones (open zero, released payments on
+the record), disclosed on their own list so the close can
+see the payment happened; the report's paid totals sum the
+two readings of the same ledger.
 
 Surfaces: `ApService.ap_position(as_of)` /
 `position_export(as_of)`, `GET /position?as_of=`,
@@ -707,23 +735,28 @@ check is pure over the store snapshot:
   check's raw comparison is a real hole — a resend whose
   number the engine read as `inv-1001` is not `INV-1001` to
   it — and the watch closes it for the paid case.
-- **The twin must be paid**: its record carries
-  `payment_state == "PAID_PROPOSED"` *and* its run stands
-  `RELEASED`. Both readings are required; either alone is a
-  state the store could be caught mid-write in, and the
-  conjunction is also the precise business fact — a human
-  released a batch instructing this payment.
+- **The twin must be paid**: released runs on file instruct
+  money for it. The watch reads the runs themselves — every
+  `RELEASED` run's lines naming the twin — rather than the
+  twin's resting state, because the fact that matters is the
+  instruction, and a twin paid in parts was instructed by
+  more than one run: no single run's line is its paid
+  figure, their sum is. (A state-only reading would also
+  miss the planted universes the eval pack stages, where a
+  released run exists without a record-side ledger.)
 - **The amount must equal, to the cent**, one of two figures
-  from the twin's paid story: its approved face, or the run
-  line's instructed amount (the face minus the credits
-  applied before release — read off the line, not recomputed:
-  the line is what the bank was told). The module imports no
+  from the twin's paid story: its approved face, or the
+  cumulative instructed total across those runs (the face
+  minus the credits applied before release when one run paid
+  it whole — read off the lines, not recomputed: the lines
+  are what the bank was told). The module imports no
   tolerance; `matching.py`'s tolerances exist to absorb
   reading noise, and this is not a reading. Which figure
   matched is recorded as `amount_basis` — `FACE` wins ties,
   because an arrival stating the face of a payment that
   happened to instruct the same figure is most plainly read
-  as the paid bill restated.
+  as the paid bill restated. The hold names the most recent
+  paying run; `amount_paid` on it is always the cumulative.
 
 A hit is stored on the arrival's own record as a
 `PaidDuplicateHold` payload and the record's status becomes
@@ -792,6 +825,91 @@ record detail's hold block, the ledger's marker on the
 supplier's index row (`duplicate_hold_count`) and the hold
 carried on the ledger's invoice lines, CLI `duplicate-watch`
 / `resolve-duplicate`, and the demo's closing sequence.
+
+## Partial payments
+
+Round 3's membership was whole: a member joined a run at its
+full open amount, and `PAID_PROPOSED` meant exactly that.
+This round makes membership partial without moving any of
+the load-bearing definitions — the work is in where the new
+facts live, not in new arithmetic.
+
+**The part is a line fact, stated at assembly.**
+`assemble_run(..., amounts)` takes an optional per-record
+part. The member line gains `open_amount` (the full open
+amount at assembly) beside `amount` (the instructed part, or
+the whole open amount when no part is stated — old runs
+serialise with `open_amount=None`, read as the whole). The
+line remains the instructed truth: confirmations match
+advices to it unchanged, exports instruct it unchanged, and
+run totals tie to the lines as before. The money refusals run
+last in `_refusal`, after every eligibility check, so a
+fraud-held or exception record is refused for what it is
+before its part is ever judged: `INVALID_PART_AMOUNT` (part
+≤ 0) and `PART_EXCEEDS_OPEN` (part > open, the reason naming
+the part, the open remainder, the face, the credits, and —
+when any exist — the payments already released). Because the
+open amount already nets prior releases, that second refusal
+*is* the cumulative-overcommit check; there is no separate
+committed-sum ledger to keep in step, and an invoice in an
+open run is still refused `ALREADY_IN_RUN` before any of
+this — one open run per invoice stands.
+
+**Paid is a ledger, like credited.** `payments_applied` on
+the record mirrors `credits_applied`: entries
+(`PaymentEntry` — run id, amount, currency, actor, moment)
+written only by the release path, from the run's own lines,
+in the same act that moves the state. `credits.paid_amount`
+sums it, and `open_amount` — the one computation — becomes
+face − credits − paid. No migration: records are JSONB
+payloads, and the new field defaults empty on every record
+written before this round, which recomputes their open
+amounts identically (paid 0.00).
+
+**The resting state is derived from the ledger at each
+transition.** Release: open 0.00 after the entry lands →
+`PAID_PROPOSED` (the round-3 audit event, same words); a
+remainder survives → `PART_PAID` (new event
+`payment_run_part_paid`, the part, cumulative, and remainder
+in its detail). Return: the freed member recomputes from its
+ledger — payments on file → `PART_PAID` with `payment_run_id`
+pointing at the most recent paying run; none → membership
+cleared as before. A part-paid invoice therefore never reads
+unpaid again, and a fully paid one is indistinguishable from
+a once-paid one — by design: downstream, "paid in full" is
+one fact however it was reached.
+
+**The readers needed no new arithmetic — that is the
+point.** The packet already proposed `open_amount`; it now
+also carries the payments ledger on its lines, so the
+remainder's provenance prints. The position's state mapping
+gains `PART_PAID` as a fourth column of the *open* split
+(the remainder ages; the paid figure is a per-line memo and
+a per-supplier/currency memo total, kept out of the ageing
+splits so nothing double-counts), and a `FullyPaidLine`
+disclosure — open zero *with* payments — beside the
+fully-credited one; an invoice both fully credited and
+partly paid is disclosed as fully paid, the stronger fact.
+The ledger reads the same `paid_amount` per invoice and adds
+it to its currency totals; its tie to the position is the
+round-7 tie, restated: open still foots, paid is a second
+memo both readers source from the one ledger. The duplicate
+watch's paid-history scan moved from the twin's resting
+state to the released runs' lines (above), which is what
+makes its `NET` basis honest under parts: the cumulative
+instructed total, with the most recent paying run named on
+the hold.
+
+**What was deliberately not built.** No payment scheduling
+(a part is stated by the treasurer per run, not derived from
+terms or percentages in policy — the 60/40 split is a human
+judgement this system records, not one it makes); no
+splitting one run's part across bank accounts or value
+dates; no interest or discount arithmetic on early/late
+parts; and no change to confirmation semantics — an advice
+still answers one run's lines, so a part-paid invoice's
+remainder is confirmed, if at all, by the later run's own
+advice.
 
 ## Data services
 

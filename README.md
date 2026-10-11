@@ -151,7 +151,8 @@ submission ──► intake ──► split & classify ──► extract ──�
 - **The packet** — a read model over approved invoices:
   proposed payments by supplier and currency, each at its
   **open amount** — the approved face minus the credit notes
-  applied against it, listed on the line — plus the approved
+  applied against it and the payments already released
+  against it, both listed on the line — plus the approved
   credits still unapplied, with the reason each one waits.
   Generating it moves no money; this system has no code path
   that could.
@@ -184,7 +185,8 @@ invoice they name**:
   fraud-held record is refused with the hold named.
 - **The approved amount never changes.** The invoice's face is
   history — an approver approved that figure. What moves is
-  the derived **open amount**: face minus applied credits. The
+  the derived **open amount**: face minus applied credits
+  minus payments released. The
   packet proposes it, payment runs pay it, the bank export
   instructs it — one amount rule, computed once in
   `credits.py`.
@@ -248,17 +250,20 @@ the control:
 - **One open run per record.** Assembly holds each member on
   its record. Naming a held record in a second run refuses it
   by name, with the holding run's id in the reason — and a
-  record from a released run is refused forever: it is already
-  in a bank export, and paying twice is the failure this exists
-  to prevent.
-- **Members are invoices, at their open amounts.** The credits
-  applied against a member ride its line, so the treasurer
-  sees why the figure that will leave the bank differs from
-  the invoice's face; the export instructs the net figure, so
-  the run's total is the sum of what actually leaves. A credit
-  note offered as a member is refused by name, and so is a
-  fully credited invoice (`FULLY_CREDITED`) — nothing is
-  silently dropped.
+  record whose open amount has been fully released is refused
+  forever: it is already in a bank export, and paying twice
+  is the failure this exists to prevent. A record released at
+  only part of its open amount is a different case — it may
+  join the *next* run for its remainder (see **Partial
+  payments** below).
+- **Members are invoices, at their open amounts — or at a
+  stated part of them.** The credits applied against a member
+  ride its line, so the treasurer sees why the figure that
+  will leave the bank differs from the invoice's face; the
+  export instructs the net figure, so the run's total is the
+  sum of what actually leaves. A credit note offered as a
+  member is refused by name, and so is a fully credited
+  invoice (`FULLY_CREDITED`) — nothing is silently dropped.
 - **Nothing ineligible slips in quietly.** Fraud-held and
   exception records can never enter a run; asking for them
   produces a named refusal (code + reason) while the run
@@ -355,15 +360,20 @@ is that read, computed in one pass over the record store:
   `UNDATED` — its own line class, totalled and shown, never
   silently bucketed by an age it does not carry.
 - **One open-amount rule.** Every figure is `credits.py`'s
-  open amount — approved face minus the applied-credit
-  ledger — the same computation the packet and the runs read.
-  The position never recomputes it differently.
+  open amount — approved face minus the applied-credit ledger
+  minus the payments released against it — the same
+  computation the packet and the runs read. The position never
+  recomputes it differently.
 - **The state of the money is a second split of the same
   total.** Each line is `OPEN_FREE`, `IN_RUN` (held by an open
-  run), or `PAID_PROPOSED` (released, awaiting the bank's
-  confirmation). The state columns and the ageing columns both
-  foot to the same open total, per supplier and per currency,
-  and the report checks its own arithmetic.
+  run), `PAID_PROPOSED` (released in full, awaiting the bank's
+  confirmation), or `PART_PAID` — released in part, with the
+  cumulative paid figure riding the line as a memo; it is the
+  *remainder* that ages, at the invoice's due date, because
+  the paid money is no longer owed. The state columns and the
+  ageing columns both foot to the same open total, per
+  supplier and per currency, and the report checks its own
+  arithmetic.
 - **A tie that can break, by name.** The packet is not
   as-of-parameterised, so the position computes both totals
   from the same records in the same pass — the packet total by
@@ -381,6 +391,9 @@ is that read, computed in one pass over the record store:
   the close should see money in dispute. Fully credited
   invoices (open exactly 0.00) are listed too: they owe
   nothing and age nothing, and the cover should be visible.
+  So are **fully paid** invoices — open 0.00 with released
+  payments against them: they age nothing either, but the
+  close should see that the money went out, and how much.
 - **Surfaces.** `GET /position?as_of=YYYY-MM-DD`, the console's
   close section (supplier rows expand to the records under
   them), CLI `position <as-of> [--export]`, the demo's closing
@@ -470,19 +483,21 @@ history**:
   a duplicate judgement is an accusation, not a reading.
 - **Two bases, named on the hold.** `FACE`: the arrival
   states the paid invoice's approved face. `NET`: it states
-  the figure the released run actually instructed — the face
-  minus the credits applied before release. A supplier who
-  was credited and re-bills at the net figure is the classic
-  second arrival, and the hold says which figure it matched.
-  An arrival at any other amount is **not held**: the number
-  rule surfaces it as a `DUPLICATE_INVOICE` exception, as
-  before — a different amount is a different claim. A
-  different number at the paid amount is a different bill and
-  is not held either.
+  the total the released runs actually instructed — the face
+  minus the credits applied before release when one run paid
+  the invoice whole, and the sum of the parts when it was
+  paid in parts. A supplier who was credited and re-bills at
+  the net figure is the classic second arrival, and the hold
+  says which figure it matched. An arrival at any other
+  amount is **not held**: the number rule surfaces it as a
+  `DUPLICATE_INVOICE` exception, as before — a different
+  amount is a different claim. A different number at the paid
+  amount is a different bill and is not held either.
 - **The hold.** A hit stops the record at
   `PAID_DUPLICATE_HOLD`, with the paid evidence on its face:
-  the original record, the run that released it, who released
-  it and when, and the amount the export instructed. The
+  the original record, the most recent run that released
+  money for it, who released it and when, and the cumulative
+  amount the exports instructed. The
   approver's gate refuses to decide it (**409**, the evidence
   named — the fraud-hold precedent), and a payment run refuses
   it by name. The watch list — `GET /duplicates/watch`, the
@@ -507,6 +522,74 @@ history**:
   credit notes and remittance advices behave exactly as they
   did before the watch existed; a bank-change resend is a
   fraud case first and never the watch's.
+
+## Partial payments
+
+Everything above reads as if an invoice is paid once, whole.
+Real AP does not work that way: a large invoice is paid 60%
+now and 40% next cycle, against a disputed line, a retention,
+a cash calendar. A run that can only take an invoice whole
+forces the treasurer to choose between paying early and
+paying late — so a run member may now be taken **at a stated
+part** of its open amount, and every reader of the money
+agrees on what that means:
+
+- **The part is stated at assembly, exact to the cent.** The
+  run's request names the part per record (`--amounts
+  REC-…=600.00` on the CLI, `amounts` on the API). The line
+  carries the part as its instructed amount — the line stays
+  the truth a confirmation answers and an export instructs —
+  beside the full open amount it was taken from. A part of
+  zero or less is refused (`INVALID_PART_AMOUNT`); a part
+  beyond the open amount is refused (`PART_EXCEEDS_OPEN`)
+  with the requested part, the open remainder, and the
+  already-released cumulative in the reason — that refusal
+  *is* the cumulative-overcommit check, because the open
+  amount already nets everything released before. An invoice
+  still sits in at most **one open run** at a time: the
+  invariant from the payment run holds; what changes is that
+  across *sequential* runs it pays down.
+- **Release writes a payments ledger on the record.** Each
+  release appends one entry — run, amount, currency,
+  treasurer, moment — and the record's open amount becomes
+  what it always should have been: **approved face − credits
+  applied − payments released**, computed in exactly one
+  place (`credits.py`), the figure the packet, the runs, the
+  position, and the ledger all read. The approved face and
+  the approval never move.
+- **The state says what is true.** A member released at its
+  full open amount stands `PAID_PROPOSED`, exactly as before.
+  A member released at a part stands **`PART_PAID`**, with
+  its ledger on the record: proposed for part, owed for the
+  rest, and no surface calls it paid. When a later run's
+  release brings the cumulative to the full open amount, it
+  stands `PAID_PROPOSED` and reads exactly as a once-paid
+  invoice does. Returning a later run restores `PART_PAID` —
+  never unpaid: the ledger decides the resting state, not
+  the run that just left.
+- **The readers agree.** The packet proposes the remainder,
+  with the released parts on its line. The position ages the
+  remainder in the `PART_PAID` state column, carries the paid
+  figure as a memo, and discloses the invoice as fully paid
+  when the paydown completes; its open total still foots and
+  still ties to the packet. The supplier ledger shows each
+  part beside the credits on the invoice's line, and its
+  per-supplier open still ties to the position.
+- **The disciplines follow the parts.** A remittance advice
+  answers a run's *line*: an advice for the part confirms
+  that part exactly; an advice for the full face against a
+  part run is an over-payment break on that run and confirms
+  nothing about the remainder, which stays open for a later
+  run. A credit note can land on a part-paid invoice's
+  remainder — `TARGET_PAID_PROPOSED` is terminal only for an
+  invoice paid in full — and an over-credit is judged
+  against the remainder's figures. And the duplicate watch
+  holds a resend of a part-paid invoice on the **cumulative**
+  instructed figure: the `NET` basis is what the released
+  runs instructed in total, across every part, named by the
+  most recent paying run. A resend at the *remainder* is not
+  held — the remainder was never paid; the number rule
+  surfaces it as a different claim, as before.
 
 ## Configuration
 
@@ -604,12 +687,14 @@ gates on it:
   a corrupted record whose ledger exceeds its face must
   break the tie by name (`POSITION_TIE_BREAK`).
 - **Supplier ledger** — Harborlight's totals (face, credits,
-  open) must tie to its position row, and every supplier's
-  ledger must tie; a stray invoice from a spelling the master
-  has never seen must land under Unmatched, on no supplier's
-  ledger; the credit, confirmation, and open-break story
-  must render whole; and the bank warning must be present
-  exactly where a document disagreed with the master.
+  paid, open) must tie to its position, with its released
+  invoices disclosed on the position's fully-paid list, and
+  every supplier's ledger must tie; a stray invoice from a
+  spelling the master has never seen must land under
+  Unmatched, on no supplier's ledger; the credit,
+  confirmation, and open-break story must render whole; and
+  the bank warning must be present exactly where a document
+  disagreed with the master.
 - **Paid-duplicate watch** — a released invoice re-submitted
   verbatim must be held on its paid evidence, the gate's
   refusal must name that evidence, and a controller's release
@@ -621,6 +706,20 @@ gates on it:
   reason must be refused, a second arrival must re-hold after
   a release, and the paid record and its run must be
   byte-identical throughout.
+- **Partial payments** — an invoice taken at 1200.00 of a
+  2000.00 face must stand `PART_PAID` with the part on its
+  payments ledger; a further 900.00 against the 800.00
+  remainder must be refused as an overcommit with the figures
+  named; a 200.00 credit must land on the remainder and a
+  900.00 credit must be judged against the remainder, not the
+  face; the position must age only the remainder with the
+  paid figure beside it; an advice for the part must confirm
+  the part, and one for the full face must read as an
+  over-payment on that run; the second run must complete the
+  paydown (1200 + 600 = 2000 − 200) with each export
+  instructing only its own part; and resends must be held on
+  the cumulative instructed figure — 1200.00 after the first
+  run, 1800.00 after both.
 
 Live-Reducto eval runs are opt-in (`EVAL_LIVE=1` with a key)
 and reported, not gated.

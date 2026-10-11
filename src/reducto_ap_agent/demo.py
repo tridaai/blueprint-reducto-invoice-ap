@@ -29,15 +29,22 @@ time after its run released, held on the paid evidence with
 the gate refusing to decide it, confirmed a duplicate by a
 controller; and the supplier's net re-bill, held on the NET
 basis and released as not a duplicate — back to the exception
-its own match earned, in the open.
+its own match earned, in the open — and finally one invoice
+paid in parts: a fresh Harborlight bill taken at 60% by one
+run and the remaining 40% by the next, standing PART_PAID in
+between, with an overcommit refused by name on the way and
+every reader — packet, position, ledger — landing on the
+same figures at each step.
 """
 
 from __future__ import annotations
 
 from langgraph.checkpoint.memory import MemorySaver
 
+from .credits import open_amount as _open_amount
+from .credits import paid_amount as _paid_amount
 from .datasets import _doc, _inv_fields, build_world, remittance_advice_doc
-from .errors import GateError
+from .errors import GateError, PaymentRunError
 from .graph import ApPipeline
 from .object_store import InMemoryObjectStore
 from .offline_docs import OfflineDocumentAdapter
@@ -265,6 +272,12 @@ def run_demo() -> ApService:
         print(f"  FULLY CREDITED {covered.invoice_number} "
               f"({covered.supplier_name}) face {covered.face:.2f} — "
               "credits brought it to 0.00; it owes nothing and ages nothing")
+    for settled in position.fully_paid:
+        print(f"  FULLY PAID {settled.invoice_number} "
+              f"({settled.supplier_name}) face {settled.face:.2f} − "
+              f"credits {settled.credits:.2f} − paid {settled.paid:.2f} — "
+              "released money brought it to 0.00; disclosed here so the "
+              "close sees the payment happened")
 
     print("\nOne more document arrives — from a supplier name AP has "
           "never seen spelled this way:")
@@ -307,8 +320,11 @@ def run_demo() -> ApService:
             money_state += f" · bank: {inv.payment_confirmation}"
         ageing = inv.bucket or ("fully credited" if inv.fully_credited
                                 else "outside the position")
+        paid_part = (f" − paid {inv.paid_total:>6.2f}"
+                     if inv.paid_total else "")
         print(f"  {inv.invoice_number:<9} {inv.status:<12} face "
-              f"{inv.face:>8.2f} − credits {inv.credits_total:>6.2f} = open "
+              f"{inv.face:>8.2f} − credits {inv.credits_total:>6.2f}"
+              f"{paid_part} = open "
               f"{inv.open:>8.2f} {inv.currency} · {money_state} · {ageing}")
     for credit in ledger.credits:
         state = credit.credit_state or "—"
@@ -326,7 +342,8 @@ def run_demo() -> ApService:
               f"({brk.reconciliation_id}, {brk.recon_status})")
     for totals in ledger.totals:
         print(f"  TOTALS {totals.currency}: face {totals.face_total:.2f} − "
-              f"credits {totals.credits_total:.2f} = open "
+              f"credits {totals.credits_total:.2f} − paid "
+              f"{totals.paid_total:.2f} = open "
               f"{totals.open_total:.2f} · position "
               f"{totals.position_open_total:.2f} — "
               f"{'TIED' if totals.tied else 'POSITION_TIE_BREAK'}")
@@ -348,8 +365,9 @@ def run_demo() -> ApService:
     hold = resend.duplicate_hold
     print(f"  {resend.record_id} invoice INV-1001 again — {resend.status}")
     print(f"  evidence: already released for payment as "
-          f"{hold.original_record_id} in run {hold.payment_run_id} for "
-          f"{hold.currency} {hold.amount_paid:.2f} (face "
+          f"{hold.original_record_id} — {hold.currency} "
+          f"{hold.amount_paid:.2f} instructed across released runs, "
+          f"most recently run {hold.payment_run_id} (face "
           f"{hold.paid_face_amount:.2f}); this arrival states "
           f"{hold.arrived_amount:.2f} — the {hold.amount_basis} figure")
     try:
@@ -391,6 +409,55 @@ def run_demo() -> ApService:
           "AP team's to work, as an exception, in the open")
     watch = service.list_duplicate_watch("2026-11-15")
     print(f"  watch list now: {len(watch)} standing hold(s)")
+
+    print("\nPaid in parts — a big bill rarely waits for one cycle:")
+    s08 = world.supplier("SUP-08")
+    part_text = _doc("INVOICE", 1, _inv_fields(
+        s08, "INV-2090", "PO-6020", 900.00,
+    ), [LineItem(sku="SKU-N1", description="Anchor chain",
+                 quantity=10, unit_price=90.00, amount=900.00)])
+    (part_invoice,) = service.submit(
+        "SUB-DEMO-PARTS", "sub-demo-parts.pdf",
+        part_text.encode("utf-8"), "text/plain",
+    )
+    service.decide(part_invoice.record_id, "approve", APPROVER,
+                   "demo: matched, approved")
+    print(f"  {part_invoice.record_id} INV-2090 (Harborlight) — "
+          "face 900.00, approved; the treasurer pays 60% this cycle")
+    part_run = service.create_payment_run(
+        "2026-11-20", record_ids=[part_invoice.record_id],
+        amounts={part_invoice.record_id: 540.00})
+    (part_line,) = part_run.lines
+    print(f"  {part_run.run_id} line: part {part_line.amount:.2f} of "
+          f"open {part_line.open_amount:.2f} — the line is the "
+          "instruction, and it instructs the part only")
+    service.decide_payment_run(
+        part_run.run_id, "release", "Jonas Weber (treasurer)",
+        "demo: first part reviewed")
+    standing = service.get_record(part_invoice.record_id)
+    print(f"  → released: the invoice stands {standing.payment_state} — "
+          f"paid {_paid_amount(standing):.2f}, open "
+          f"{_open_amount(standing):.2f}; it is "
+          "not paid, and nothing calls it paid")
+    try:
+        service.create_payment_run(
+            "2026-11-27", record_ids=[part_invoice.record_id],
+            amounts={part_invoice.record_id: 500.00})
+        print("  a 500.00 second part assembled (unexpected)")
+    except PaymentRunError as exc:
+        print(f"  REFUSED: {exc}")
+    rest_run = service.create_payment_run(
+        "2026-12-04", record_ids=[part_invoice.record_id],
+        amounts={part_invoice.record_id: 360.00})
+    service.decide_payment_run(
+        rest_run.run_id, "release", "Jonas Weber (treasurer)",
+        "demo: the rest, next cycle")
+    settled = service.get_record(part_invoice.record_id)
+    print(f"  → second release: {settled.payment_state} — paid "
+          f"{_paid_amount(settled):.2f} of face 900.00 across two runs, "
+          f"open {_open_amount(settled):.2f}; the position discloses it "
+          "as fully paid, and a resend of it would be held on the "
+          "900.00 the two runs instructed together")
 
     return service
 
