@@ -24,6 +24,16 @@ The remittance cases plant the confirmation holds: an advice
 naming no payment run, and one naming a run that is not on
 file. The advice that answers a real run is built per scenario
 — a run's id exists only once a batch is assembled.
+
+The credit cases plant the application discipline: CN-1001
+credits INV-1001 by name and partially covers it; CN-2003
+covers INV-2003 in full; CN-2002 is larger than the invoice it
+credits (an over-credit, refused); CN-9001 names no invoice at
+all and CN-9002 names one AP has never seen (both held
+unapplied, for different named reasons); CN-1007 credits the
+fraud-held invoice; CN-1003 credits INV-1001 too, and exists
+so a scenario can attempt it late — after its invoice has
+already been released in a payment run.
 """
 
 from __future__ import annotations
@@ -240,7 +250,8 @@ def build_world() -> World:
         [ExpectedDoc("invoice", "EXCEPTION", "INV-1001", 1400.00, "EXCEPTION", ["DUPLICATE_INVOICE"])])
     cn_fields = [
         ("Supplier", s02.name), ("Credit Note Number", "CN-1001"), ("Issue Date", "2026-09-20"),
-        ("PO Reference", "PO-6001"), ("Currency", "USD"), ("Bank Account", s02.bank_account),
+        ("PO Reference", "PO-6001"), ("Credits Invoice", "INV-1001"), ("Currency", "USD"),
+        ("Bank Account", s02.bank_account),
         ("Subtotal", "-200.00"), ("Tax", "0.00"), ("Total", "-200.00"),
     ]
     add("SUB-007", _doc("CREDIT NOTE", 1, cn_fields, [L("SKU-A2", "Gasket sets — damaged in transit", 5, -40.00)]),
@@ -314,5 +325,40 @@ def build_world() -> World:
         ("INV-1002", 1010.00, "USD", "2026-10-16", "BNK-2026-2202"),
     ]),
         [ExpectedDoc("remittance_advice", "RECEIVED")])
+
+    # -- the credit world --------------------------------------
+    # Every credit below matches cleanly against its PO and
+    # reaches the approver — the application discipline is what
+    # the scenarios exercise, and it starts only once a credit
+    # is approved. Each document names the invoice it credits
+    # on its face (the Credits Invoice field), except CN-9001,
+    # which names none: that absence is its planted case.
+    def cn(sid: str, supplier: Supplier, number: str, po_ref: str,
+           credits: str | None, total: float, line: LineItem) -> None:
+        fields = [
+            ("Supplier", supplier.name), ("Credit Note Number", number),
+            ("Issue Date", "2026-09-22"), ("PO Reference", po_ref),
+        ]
+        if credits:
+            fields.append(("Credits Invoice", credits))
+        fields += [
+            ("Currency", "USD"), ("Bank Account", supplier.bank_account),
+            ("Subtotal", f"{total:.2f}"), ("Tax", "0.00"), ("Total", f"{total:.2f}"),
+        ]
+        add(sid, _doc("CREDIT NOTE", 1, fields, [line]),
+            [ExpectedDoc("credit_note", "AWAITING_APPROVER", number, total, "MATCHED")])
+
+    cn("SUB-024", s08, "CN-2003", "PO-6022", "INV-2003", -200.00,
+       L("SKU-N3", "Rope coils — all four damaged on delivery", 4, -50.00))
+    cn("SUB-025", s08, "CN-2002", "PO-6021", "INV-2002", -450.00,
+       L("SKU-N2", "Deck paint — price correction, whole batch", 1, -450.00))
+    cn("SUB-026", s02, "CN-9001", "PO-6001", None, -60.00,
+       L("SKU-A2", "Gasket sets — goodwill credit", 1, -60.00))
+    cn("SUB-027", s02, "CN-9002", "PO-6001", "INV-9999", -75.00,
+       L("SKU-A2", "Gasket sets — handling credit", 1, -75.00))
+    cn("SUB-028", s07, "CN-1007", "PO-6007", "INV-1007", -150.00,
+       L("SKU-E1", "Pallet freight — service credit", 1, -150.00))
+    cn("SUB-029", s02, "CN-1003", "PO-6001", "INV-1001", -100.00,
+       L("SKU-A1", "Industrial valves — volume rebate", 1, -100.00))
 
     return World(suppliers=suppliers, purchase_orders=purchase_orders, receipts=receipts, submissions=subs)
