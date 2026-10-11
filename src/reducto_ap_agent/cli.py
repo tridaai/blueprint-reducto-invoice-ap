@@ -37,6 +37,10 @@ def main(argv: list[str] | None = None) -> int:
     p_submit.add_argument("path")
     p_submit.add_argument("--id", default=None)
     sub.add_parser("records", help="list all records as JSON")
+    sub.add_parser("credits", help="list credit notes with their application state and unapplied reasons")
+    p_apply = sub.add_parser("apply-credit", help="a controller applies one credit note against the invoice it names")
+    p_apply.add_argument("record_id")
+    p_apply.add_argument("--actor", required=True)
     sub.add_parser("packet", help="print the proposed payment packet as JSON")
     p_run = sub.add_parser("create-run", help="assemble a payment run and hold its members")
     p_run.add_argument("--value-date", required=True)
@@ -75,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps([r.model_dump() for r in records], indent=2))
         elif args.command == "records":
             print(json.dumps([r.model_dump() for r in service.list_records()], indent=2))
+        elif args.command == "credits":
+            print(json.dumps(service.list_credits(), indent=2))
+        elif args.command == "apply-credit":
+            print(service.apply_credit(args.record_id, args.actor).model_dump_json(indent=2))
         elif args.command == "packet":
             print(service.payment_packet().model_dump_json(indent=2))
         elif args.command == "create-run":

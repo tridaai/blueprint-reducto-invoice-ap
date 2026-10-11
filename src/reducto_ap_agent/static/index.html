@@ -193,10 +193,35 @@ async function loadRecords() {
       tr.addEventListener("click", () => showRecord(tr.dataset.id)));
   }
   const packet = await api("/payments/packet");
-  $("packet").innerHTML = packet.lines.length
-    ? packet.lines.map(l => `<div>${l.supplier_name} · ${l.invoice_number} · <strong>${l.currency} ${money(l.amount)}</strong></div>`).join("")
+  let packetHtml = packet.lines.length
+    ? packet.lines.map(l => {
+        let line = `<div>${l.supplier_name} · ${l.invoice_number} · <strong>${l.currency} ${money(l.amount)}</strong>`;
+        if (l.credits_applied && l.credits_applied.length)
+          line += ` <span class="note">(face ${money(l.gross_amount)} − credits ${l.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", ")})</span>`;
+        return line + `</div>`;
+      }).join("")
       + `<div class="note" style="margin-top:6px;">${packet.note}</div>`
     : "No approved records yet — the packet is empty.";
+  if (packet.unapplied_credits && packet.unapplied_credits.length) {
+    packetHtml += `<h2 style="margin-top:16px;">Unapplied credits</h2>`
+      + `<p class="note" style="margin-top:0;">Approved credits no controller has applied yet. An unapplied credit has reduced nothing — applying it is a named controller's act against the invoice the document names.</p>`
+      + packet.unapplied_credits.map(c => `<div style="margin-bottom:8px;">${c.credit_number} · ${c.supplier_name} · <strong>${c.currency} ${money(c.amount)}</strong> — ${c.reason}<br>
+          <input id="cr-actor-${c.record_id}" placeholder="Controller name (required)" size="24">
+          <button class="secondary" data-apply-credit="${c.record_id}">Apply credit</button>
+          <span class="note" id="cr-error-${c.record_id}"></span></div>`).join("");
+  }
+  $("packet").innerHTML = packetHtml;
+  document.querySelectorAll("button[data-apply-credit]").forEach(b =>
+    b.addEventListener("click", async () => {
+      const id = b.dataset.applyCredit;
+      try {
+        await api("/credits/" + id + "/apply", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({actor: $("cr-actor-" + id).value}),
+        });
+        await loadRecords();
+      } catch (e) { $("cr-error-" + id).textContent = e.message; }
+    }));
 }
 
 async function showRecord(id) {
@@ -236,6 +261,15 @@ async function showRecord(id) {
   }
   if (r.decision)
     html += `<p class="note" style="margin-top:10px;">Gate: ${r.decision.decision} by ${r.decision.actor}${r.decision.reason ? " — " + r.decision.reason : ""}</p>`;
+  if (r.doc_class === "credit_note")
+    html += `<p class="note" style="margin-top:6px;">Credit: <strong>${r.credit_state || "—"}</strong>${r.applied_invoice_record_id ? " — applied against invoice record " + r.applied_invoice_record_id : " — unapplied credits reduce nothing"}</p>`;
+  if (r.credits_applied && r.credits_applied.length) {
+    const face = r.extraction ? r.extraction.fields.total?.value : null;
+    const appliedSum = r.credits_applied.reduce((s, c) => s + c.amount, 0);
+    html += `<h2 style="margin-top:14px;">Credits applied against this invoice</h2><table><thead><tr><th>Credit</th><th>Amount</th><th>Applied by</th></tr></thead><tbody>`
+      + r.credits_applied.map(c => `<tr><td>${c.credit_number}</td><td>${money(c.amount)}</td><td>${c.actor}</td></tr>`).join("")
+      + `</tbody></table><p class="note">Face ${money(face)} − credits ${money(appliedSum)} = open <strong>${money((face ?? 0) - appliedSum)}</strong> — the figure the packet and the runs read. The face itself never changes.</p>`;
+  }
   if (r.payment_run_id)
     html += `<p class="note" style="margin-top:6px;">Payment: ${r.payment_state === "PAID_PROPOSED" ? "paid-proposed in released run" : "held in open run"} ${r.payment_run_id}</p>`;
   if (r.payment_confirmation)
@@ -334,8 +368,8 @@ async function loadRuns() {
       .map(([c, t]) => `${c} ${money(t)}`).join(" · ");
     let html = `<h2 style="margin-top:18px;">${run.run_id} — value date ${run.value_date}</h2>
       <p class="note">Status <span class="status st-${run.status}">${run.status}</span> · totals: ${totals}${run.currencies.length ? " · scope: " + run.currencies.join(", ") : ""}</p>`;
-    html += `<table><thead><tr><th>Record</th><th>Supplier</th><th>Invoice</th><th>Currency</th><th>Amount</th></tr></thead><tbody>`
-      + run.lines.map(l => `<tr><td>${l.record_id}</td><td>${l.supplier_name}</td><td>${l.invoice_number}</td><td>${l.currency}</td><td>${money(l.amount)}</td></tr>`).join("")
+    html += `<table><thead><tr><th>Record</th><th>Supplier</th><th>Invoice</th><th>Currency</th><th>Amount (open)</th><th>Credits netted</th></tr></thead><tbody>`
+      + run.lines.map(l => `<tr><td>${l.record_id}</td><td>${l.supplier_name}</td><td>${l.invoice_number}</td><td>${l.currency}</td><td>${money(l.amount)}</td><td>${l.credits_applied && l.credits_applied.length ? "face " + money(l.gross_amount) + " − " + l.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", ") : "—"}</td></tr>`).join("")
       + `</tbody></table>`;
     (run.refusals || []).forEach(rf =>
       html += `<p class="flag">Refused ${rf.record_id} — ${rf.code}: ${rf.reason}</p>`);

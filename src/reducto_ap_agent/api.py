@@ -70,6 +70,10 @@ class ConfirmationDecisionRequest(BaseModel):
     note: str = ""
 
 
+class ApplyCreditRequest(BaseModel):
+    actor: str
+
+
 def create_app(service: ApService | None = None) -> FastAPI:
     load_dotenv()
     configure_json_logging()
@@ -204,6 +208,14 @@ def create_app(service: ApService | None = None) -> FastAPI:
             reconciliation_id, request.action, request.actor, request.note
         )
         return recon.model_dump()
+
+    @app.get("/credits")
+    def list_credits() -> list[dict]:
+        return svc().list_credits()
+
+    @app.post("/credits/{record_id}/apply")
+    def apply_credit(record_id: str, request: ApplyCreditRequest) -> dict:
+        return svc().apply_credit(record_id, request.actor).model_dump()
 
     @app.get("/payments/packet")
     def payment_packet() -> dict:

@@ -6,8 +6,12 @@ reach the gate, and prints what an operator would see: the
 matches, the exceptions with their codes, the fraud hold, the
 refusal — then the two supplier statements reconciled line by
 line with their breaks itemised and a controller's decision on
-each — the payment packet that proposes, and executes
-nothing — and finally a payment run: the approved records
+each — then the credit notes: a controller applies them
+against the invoices they name (one nets, one covers its
+invoice in full, two are refused by name — an over-credit and
+one against the fraud hold) — the payment packet that
+proposes open amounts, and executes nothing — and finally a
+payment run: the approved records
 assembled for a value date, the fraud hold and the exception
 refused by name when they are (mistakenly) asked for, and a
 treasurer releasing the batch into a bank-instruction export
@@ -23,6 +27,7 @@ from __future__ import annotations
 from langgraph.checkpoint.memory import MemorySaver
 
 from .datasets import build_world, remittance_advice_doc
+from .errors import GateError
 from .graph import ApPipeline
 from .object_store import InMemoryObjectStore
 from .offline_docs import OfflineDocumentAdapter
@@ -100,12 +105,43 @@ def run_demo() -> ApService:
             )
             print(f"  → {decided.status} by Marta Chen (controller)")
 
+    print("\nCredit notes — a controller applies them against the invoices they name:")
+    controller = "Marta Chen (controller)"
+    for credit_id in ("REC-SUB-007-0", "REC-SUB-024-0"):
+        applied = service.apply_credit(credit_id, controller)
+        entry = next(
+            c for c in service.get_record(
+                applied.applied_invoice_record_id or ""
+            ).credits_applied
+            if c.credit_record_id == credit_id
+        )
+        print(f"  {entry.credit_number:<9} applied by {controller}: "
+              f"{entry.amount:>7.2f} {entry.currency} against "
+              f"{applied.applied_invoice_record_id}")
+    for credit_id in ("REC-SUB-025-0", "REC-SUB-028-0"):
+        try:
+            service.apply_credit(credit_id, controller)
+            print(f"  {credit_id}: applied (unexpected)")
+        except GateError as exc:
+            print(f"  REFUSED {credit_id}: {exc}")
+
     packet = service.payment_packet()
     print(f"\nPayment packet {packet.packet_id} — proposed only, nothing executed:")
     for line in packet.lines:
-        print(f"  {line.supplier_name:<28} {line.invoice_number:<10} {line.currency} {line.amount:>10.2f}")
+        detail = ""
+        if line.credits_applied:
+            credits = ", ".join(
+                f"{c.credit_number} −{c.amount:.2f}" for c in line.credits_applied
+            )
+            detail = f"  (face {line.gross_amount:.2f} − credits {credits})"
+        print(f"  {line.supplier_name:<28} {line.invoice_number:<10} {line.currency} {line.amount:>10.2f}{detail}")
     for currency, total in packet.totals_by_currency.items():
         print(f"  {'TOTAL':<42} {currency} {total:>10.2f}")
+    if packet.unapplied_credits:
+        print("  Unapplied credits (approved, on file, reducing nothing yet):")
+        for credit in packet.unapplied_credits:
+            print(f"    {credit.credit_number:<9} {credit.supplier_name:<28} "
+                  f"{credit.currency} {credit.amount:>7.2f} — {credit.reason}")
     print(f"\n{packet.note}")
 
     print("\nPayment run — the batch a treasurer can release or return:")
@@ -121,8 +157,14 @@ def run_demo() -> ApService:
     )
     print(f"\n{run.run_id} — value date {run.value_date} — {run.status} · totals: {totals}")
     for line in run.lines:
+        detail = ""
+        if line.credits_applied:
+            credits = ", ".join(
+                f"{c.credit_number} −{c.amount:.2f}" for c in line.credits_applied
+            )
+            detail = f"  (face {line.gross_amount:.2f} − credits {credits})"
         print(f"  MEMBER  {line.record_id:<16} {line.supplier_name:<28} "
-              f"{line.invoice_number:<10} {line.currency} {line.amount:>10.2f}")
+              f"{line.invoice_number:<10} {line.currency} {line.amount:>10.2f}{detail}")
     for refusal in run.refusals:
         print(f"  REFUSED {refusal.record_id:<16} {refusal.code}: {refusal.reason}")
     released = service.decide_payment_run(
@@ -139,16 +181,18 @@ def run_demo() -> ApService:
 
     print("\nRemittance confirmation — the bank answers the run:")
     advice_text = remittance_advice_doc(run.run_id, [
-        ("INV-1001", 1400.00, "USD", "2026-10-16", "BNK-2026-3101"),  # exact
+        ("INV-1001", 1200.00, "USD", "2026-10-16", "BNK-2026-3101"),  # exact — the net figure
         ("INV-1002", 1000.00, "USD", "2026-10-16", "BNK-2026-3102"),  # short 10.00
-        ("CN-1001", -200.00, "USD", "2026-10-16", "BNK-2026-3103"),   # exact
         ("INV-1010", 650.00, "USD", "2026-10-17", "BNK-2026-3104"),   # over 50.00
         ("INV-1013", 1080.00, "EUR", "2026-10-17", "BNK-2026-3105"),  # exact
         ("INV-9999", 123.00, "USD", "2026-10-17", "BNK-2026-3106"),   # not a member
-        # INV-1014, INV-2001, INV-2002, INV-2003: no line — missing.
+        # INV-1014, INV-2001, INV-2002: no line — missing.
+        # INV-2003 is not missing: it was fully credited and never
+        # became a member — the run refused it by name above.
     ])
     (advice_record,) = service.submit(
-        "SUB-024", "sub-024.pdf", advice_text.encode("utf-8"), "text/plain",
+        "SUB-DEMO-ADVICE", "sub-demo-advice.pdf",
+        advice_text.encode("utf-8"), "text/plain",
     )
     confirmation = service.confirm_remittance(advice_record.record_id)
     counts = ", ".join(
@@ -174,6 +218,17 @@ def run_demo() -> ApService:
     print(f"  → {decided.status} by Marta Chen (controller)")
     print("\nThe confirmation is evidence over the run. The run, its "
           "export, and every approval above are exactly as they were.")
+
+    print("\nA late credit — CN-1003 names INV-1001, which the run above "
+          "already released:")
+    try:
+        service.apply_credit("REC-SUB-029-0", controller)
+        print("  applied (unexpected)")
+    except GateError as exc:
+        print(f"  REFUSED REC-SUB-029-0: {exc}")
+    print("  The credit stays on file, unapplied, with its reason on the "
+          "packet — next cycle's business, settled against the supplier's "
+          "future invoices. It does not rewrite a released run.")
     return service
 
 
