@@ -49,6 +49,12 @@
   .st-AWAITING_APPROVER { color: var(--indigo); }
   .st-EXCEPTION, .st-TOTAL_MISMATCH { color: var(--warn); }
   .st-FRAUD_REVIEW, .st-REFUSED, .st-REJECTED { color: var(--bad); }
+  .st-ACCEPTED { color: var(--ok); }
+  .st-AWAITING_CONTROLLER { color: var(--indigo); }
+  .st-FLAGGED_BACK { color: var(--bad); }
+  .rc-matched { color: var(--ok); font-weight: 600; }
+  .rc-amount_disagrees, .rc-duplicates_within_statement { color: var(--warn); font-weight: 600; }
+  .rc-missing_in_ap, .rc-missing_on_statement { color: var(--bad); font-weight: 600; }
   button {
     background: var(--indigo); color: #fff; border: 0; border-radius: 999px;
     padding: 8px 16px; font-weight: 700; cursor: pointer; font-size: 13.5px;
@@ -105,6 +111,14 @@
     <div id="detail" class="note">Select a record to see its extraction, citations, match, and gate.</div>
   </section>
 </main>
+<div style="padding: 0 28px 8px;">
+  <section>
+    <h2>Supplier statement reconciliation</h2>
+    <p class="note" style="margin-top:0;">A statement is the supplier's claim about what is still owed. Reconciliation answers it line by line from AP's own records — it is evidence for the controller, and it never changes what is payable.</p>
+    <div id="recon-statements" class="note">No statements yet — load the demo world.</div>
+    <div id="recon-list"></div>
+  </section>
+</div>
 <footer>
   <img src="/favicon.svg" alt="Trida AI">
   <span>Trida AI — Blueprint: Reducto Invoice AP, deployed in-VPC</span>
@@ -177,6 +191,10 @@ async function showRecord(id) {
     html += `</dl>`;
     if (r.extraction.lines.length)
       html += `<p class="note">${r.extraction.lines.length} line items extracted.</p>`;
+    if (r.extraction.statement_lines && r.extraction.statement_lines.length)
+      html += `<h2 style="margin-top:14px;">Statement open items</h2><table><thead><tr><th>Invoice</th><th>Date</th><th>Currency</th><th>Amount</th></tr></thead><tbody>`
+        + r.extraction.statement_lines.map(l => `<tr><td>${l.invoice_number}</td><td>${l.invoice_date}</td><td>${l.currency}</td><td>${money(l.amount)}</td></tr>`).join("")
+        + `</tbody></table><p class="note">Refused by the payment path; these lines feed supplier reconciliation below.</p>`;
   }
   if (r.match) {
     html += `<h2 style="margin-top:14px;">Three-way match — ${r.match.status}</h2>`;
@@ -214,10 +232,66 @@ async function showRecord(id) {
   }
 }
 
-$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); });
-$("refresh").addEventListener("click", loadRecords);
+async function loadRecons() {
+  const records = await api("/records");
+  const statements = records.filter(r => r.doc_class === "statement");
+  const host = $("recon-statements");
+  if (!statements.length) {
+    host.innerHTML = "No statements yet — load the demo world.";
+  } else {
+    host.innerHTML = statements.map(r => {
+      const n = r.extraction ? r.extraction.statement_lines.length : 0;
+      const period = r.extraction ? (r.extraction.fields.period?.value || "") : "";
+      return `<div style="margin-bottom:6px;">${r.record_id} · ${r.supplier_name || "unknown supplier"} · ${period} · ${n} open-item lines
+        <button class="secondary" data-reconcile="${r.record_id}">Reconcile</button></div>`;
+    }).join("");
+    host.querySelectorAll("button[data-reconcile]").forEach(b =>
+      b.addEventListener("click", async () => {
+        await api("/statements/" + b.dataset.reconcile + "/reconcile", {method: "POST"});
+        await loadRecons();
+      }));
+  }
+  const recons = await api("/reconciliations");
+  $("recon-list").innerHTML = recons.map(rc => {
+    const counts = Object.entries(rc.counts).filter(([, n]) => n > 0)
+      .map(([k, n]) => `${k} ${n}`).join(" · ");
+    let html = `<h2 style="margin-top:18px;">${rc.reconciliation_id} — ${rc.supplier_name} · ${rc.period || ""}</h2>
+      <p class="note">Status <span class="status st-${rc.status}">${rc.status}</span> · totals tie: ${rc.totals_tie ? "yes" : "NO"} (stated ${money(rc.statement_total_stated)} vs lines ${money(rc.statement_total_lines)}) · ${counts}</p>`;
+    (rc.flags || []).forEach(f => html += `<p class="flag">⚠ ${f}</p>`);
+    (rc.notes || []).forEach(n => html += `<p class="note">${n}</p>`);
+    html += `<table><thead><tr><th>Invoice</th><th>Class</th><th>Statement</th><th>AP record</th><th>Note</th></tr></thead><tbody>`
+      + rc.lines.map(l => `<tr><td>${l.invoice_number}</td><td class="rc-${l.classification}">${l.classification}</td><td>${money(l.statement_amount)}</td><td>${money(l.ap_amount)}</td><td class="note">${l.note}</td></tr>`).join("")
+      + `</tbody></table>`;
+    if (rc.decision)
+      html += `<p class="note" style="margin-top:8px;">Controller: ${rc.decision.decision} by ${rc.decision.actor}${rc.decision.note ? " — " + rc.decision.note : ""}</p>`;
+    if (rc.status === "AWAITING_CONTROLLER")
+      html += `<div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <input id="rc-actor-${rc.reconciliation_id}" placeholder="Controller name (required)">
+        <input id="rc-note-${rc.reconciliation_id}" placeholder="Note (required to flag back)">
+        <button data-accept="${rc.reconciliation_id}">Accept</button>
+        <button class="secondary" data-flagback="${rc.reconciliation_id}">Flag back</button></div>
+        <p class="note" id="rc-error-${rc.reconciliation_id}"></p>`;
+    return html;
+  }).join("");
+  document.querySelectorAll("button[data-accept], button[data-flagback]").forEach(b => {
+    const id = b.dataset.accept || b.dataset.flagback;
+    const action = b.dataset.accept ? "accept" : "flag_back";
+    b.addEventListener("click", async () => {
+      try {
+        await api(`/reconciliations/${id}/decision`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({action, actor: $("rc-actor-" + id).value, note: $("rc-note-" + id).value}),
+        });
+        await loadRecons();
+      } catch (e) { $("rc-error-" + id).textContent = e.message; }
+    });
+  });
+}
+
+$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); });
+$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); });
 $("status-filter").addEventListener("change", loadRecords);
-readiness(); loadRecords();
+readiness(); loadRecords(); loadRecons();
 </script>
 </body>
 </html>

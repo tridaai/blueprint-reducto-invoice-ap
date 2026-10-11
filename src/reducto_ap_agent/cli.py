@@ -38,6 +38,9 @@ def main(argv: list[str] | None = None) -> int:
     p_submit.add_argument("--id", default=None)
     sub.add_parser("records", help="list all records as JSON")
     sub.add_parser("packet", help="print the proposed payment packet as JSON")
+    p_recon = sub.add_parser("reconcile", help="reconcile one statement record against AP's records")
+    p_recon.add_argument("record_id")
+    sub.add_parser("reconciliations", help="list statement reconciliations as JSON")
     args = parser.parse_args(argv)
 
     service = build_service()
@@ -56,6 +59,12 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps([r.model_dump() for r in service.list_records()], indent=2))
         elif args.command == "packet":
             print(service.payment_packet().model_dump_json(indent=2))
+        elif args.command == "reconcile":
+            print(service.reconcile(args.record_id).model_dump_json(indent=2))
+        elif args.command == "reconciliations":
+            print(json.dumps(
+                [r.model_dump() for r in service.list_reconciliations()], indent=2
+            ))
     except ApError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

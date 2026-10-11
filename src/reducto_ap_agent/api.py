@@ -46,6 +46,12 @@ class DecisionRequest(BaseModel):
     reason: str = ""
 
 
+class ReconDecisionRequest(BaseModel):
+    action: str  # "accept" | "flag_back"
+    actor: str
+    note: str = ""
+
+
 def create_app(service: ApService | None = None) -> FastAPI:
     load_dotenv()
     configure_json_logging()
@@ -161,6 +167,25 @@ def create_app(service: ApService | None = None) -> FastAPI:
     def decide(record_id: str, request: DecisionRequest) -> dict:
         record = svc().decide(record_id, request.decision, request.actor, request.reason)
         return record.model_dump()
+
+    @app.post("/statements/{record_id}/reconcile", status_code=201)
+    def reconcile_statement(record_id: str) -> dict:
+        return svc().reconcile(record_id).model_dump()
+
+    @app.get("/reconciliations")
+    def list_reconciliations(supplier_id: str | None = None) -> list[dict]:
+        return [r.model_dump() for r in svc().list_reconciliations(supplier_id=supplier_id)]
+
+    @app.get("/reconciliations/{reconciliation_id}")
+    def get_reconciliation(reconciliation_id: str) -> dict:
+        return svc().get_reconciliation(reconciliation_id).model_dump()
+
+    @app.post("/reconciliations/{reconciliation_id}/decision")
+    def decide_reconciliation(reconciliation_id: str, request: ReconDecisionRequest) -> dict:
+        recon = svc().decide_reconciliation(
+            reconciliation_id, request.action, request.actor, request.note
+        )
+        return recon.model_dump()
 
     @app.get("/payments/packet")
     def payment_packet() -> dict:
