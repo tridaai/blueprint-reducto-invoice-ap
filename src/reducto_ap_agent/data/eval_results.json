@@ -31,6 +31,17 @@
     "totals_tie": true,
     "records_untouched": true
   },
+  "payment_runs": {
+    "first_run_nets_and_ties": true,
+    "return_frees_members": true,
+    "refusals_named": true,
+    "totals_tie": true,
+    "member_named_with_holding_run": true,
+    "export_master_details_only": true,
+    "export_byte_stable_and_digested": true,
+    "release_locks_members": true,
+    "paid_proposed_refused_forever": true
+  },
   "failures": [],
   "gates": {
     "match_decision_accuracy == 1.0": true,
@@ -39,7 +50,13 @@
     "statement_breaks_classified_exactly": true,
     "clean_statement_reconciles_fully": true,
     "statement_totals_tie": true,
-    "reconciliation_left_records_untouched": true
+    "reconciliation_left_records_untouched": true,
+    "payment_run_totals_tie": true,
+    "payment_run_refusals_named": true,
+    "payment_run_member_named_with_holding_run": true,
+    "payment_run_return_frees_members": true,
+    "payment_run_export_master_details_only": true,
+    "payment_run_release_locks_and_export_stable": true
   },
   "gate_passed": true
 }

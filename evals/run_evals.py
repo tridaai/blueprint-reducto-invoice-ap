@@ -19,6 +19,13 @@ Gates (a failure exits non-zero):
   exact class, the clean statement reconciles fully, statement
   totals tie, and reconciling leaves every document record —
   and therefore the payment packet — untouched.
+- payment runs — an assembled batch ties its totals to its
+  member lines (credit note netting included), refuses the
+  fraud hold and the exception by name, refuses a held member
+  with the holding run named, frees its members on return,
+  and on release locks them as paid-proposed behind an export
+  that is byte-stable and carries only the supplier master's
+  bank details.
 
 Reported, not gated: per-field extraction accuracy, review-queue
 precision. A live run (EVAL_LIVE=1, DOCUMENT_BACKEND=reducto,
@@ -28,6 +35,7 @@ engine, not this code.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -172,6 +180,103 @@ def evaluate(service: ApService) -> dict:
         "records_untouched": records_untouched,
     }
 
+    # -- payment runs ------------------------------------------
+    # The controlled batch on top of the packet. Approvals are
+    # recorded first (the run takes only APPROVED records);
+    # the planted set is two invoices + the netting credit
+    # note, the fraud hold, an exception, and a member already
+    # held by an open run.
+    for record_id in (
+        "REC-SUB-001-0", "REC-SUB-007-0", "REC-SUB-017-0", "REC-SUB-013-0",
+    ):
+        service.decide(record_id, "approve", "Eval Approver", "eval: matched")
+
+    first = service.create_payment_run(
+        "2026-10-16", record_ids=["REC-SUB-001-0", "REC-SUB-007-0"]
+    )
+    first_ties = (
+        [line.record_id for line in first.lines]
+        == ["REC-SUB-001-0", "REC-SUB-007-0"]
+        and first.totals_by_currency == {"USD": 1200.00}  # 1400.00 − 200.00 CN
+    )
+    service.decide_payment_run(
+        first.run_id, "return", "Eval Treasurer", "eval: rework the batch"
+    )
+    return_frees = all(
+        service.get_record(rid).payment_state is None
+        for rid in ("REC-SUB-001-0", "REC-SUB-007-0")
+    )
+
+    batch = service.create_payment_run(
+        "2026-10-16",
+        record_ids=[
+            "REC-SUB-001-0", "REC-SUB-007-0", "REC-SUB-017-0",
+            "REC-SUB-008-0",  # the planted fraud hold
+            "REC-SUB-003-0",  # a planted price-variance exception
+        ],
+    )
+    batch_refusals = {r.record_id: r for r in batch.refusals}
+    refusals_named = (
+        batch_refusals["REC-SUB-008-0"].code == "FRAUD_HOLD"
+        and batch_refusals["REC-SUB-003-0"].code == "MATCH_EXCEPTION"
+    )
+    run_totals_tie = (
+        batch.totals_by_currency == {"USD": 2100.00}
+        and round(sum(line.amount for line in batch.lines), 2) == 2100.00
+    )
+
+    sweep = service.create_payment_run(
+        "2026-10-16", record_ids=["REC-SUB-001-0", "REC-SUB-013-0"]
+    )
+    held = {r.record_id: r for r in sweep.refusals}.get("REC-SUB-001-0")
+    member_named = (
+        held is not None
+        and held.code == "ALREADY_IN_RUN"
+        and batch.run_id in held.reason
+    )
+    service.decide_payment_run(
+        sweep.run_id, "return", "Eval Treasurer", "eval: sweep done"
+    )
+
+    service.decide_payment_run(
+        batch.run_id, "release", "Eval Treasurer", "eval: batch reviewed"
+    )
+    export_a = service.payment_run_export(batch.run_id)
+    export_b = service.payment_run_export(batch.run_id)
+    export_text = export_a.decode("utf-8")
+    export_master_only = (
+        "US00 BPAY 1111 2222 3333" in export_text  # SUP-02's master account
+        and "US00 ATTK 9999 0000 1111" not in export_text  # the fraud invoice's ask
+        and "US00 GRAN 5555 6666 7777" not in export_text  # no row for SUP-07 at all
+        and "REC-SUB-008-0" not in export_text
+    )
+    export_stable = (
+        export_a == export_b
+        and service.get_payment_run(batch.run_id).export_digest
+        == hashlib.sha256(export_a).hexdigest()
+    )
+    release_locks = (
+        service.get_record("REC-SUB-001-0").payment_state == "PAID_PROPOSED"
+    )
+    follow_up = service.create_payment_run(
+        "2026-10-23", record_ids=["REC-SUB-001-0", "REC-SUB-013-0"]
+    )
+    proposed_refused = (
+        {r.record_id: r for r in follow_up.refusals}["REC-SUB-001-0"].code
+        == "ALREADY_PAID_PROPOSED"
+    )
+    payment_run_results = {
+        "first_run_nets_and_ties": first_ties,
+        "return_frees_members": return_frees,
+        "refusals_named": refusals_named,
+        "totals_tie": run_totals_tie,
+        "member_named_with_holding_run": member_named,
+        "export_master_details_only": export_master_only,
+        "export_byte_stable_and_digested": export_stable,
+        "release_locks_members": release_locks,
+        "paid_proposed_refused_forever": proposed_refused,
+    }
+
     total_cases = len(cases)
     passed = sum(1 for c in cases if c["passed"])
     results = {
@@ -190,6 +295,7 @@ def evaluate(service: ApService) -> dict:
             queue_actual_correct / queue_should if queue_should else None
         ),
         "statement_reconciliation": statement_results,
+        "payment_runs": payment_run_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
@@ -200,6 +306,19 @@ def evaluate(service: ApService) -> dict:
         "clean_statement_reconciles_fully": clean_full,
         "statement_totals_tie": totals_tie,
         "reconciliation_left_records_untouched": records_untouched,
+        "payment_run_totals_tie": payment_run_results["totals_tie"],
+        "payment_run_refusals_named": payment_run_results["refusals_named"],
+        "payment_run_member_named_with_holding_run":
+            payment_run_results["member_named_with_holding_run"],
+        "payment_run_return_frees_members":
+            payment_run_results["return_frees_members"],
+        "payment_run_export_master_details_only":
+            payment_run_results["export_master_details_only"],
+        "payment_run_release_locks_and_export_stable": (
+            payment_run_results["release_locks_members"]
+            and payment_run_results["export_byte_stable_and_digested"]
+            and payment_run_results["paid_proposed_refused_forever"]
+        ),
     }
     results["gate_passed"] = all(results["gates"].values())
     return results
