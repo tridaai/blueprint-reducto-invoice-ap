@@ -1,13 +1,15 @@
 """The record store: processed documents and their decisions.
 
 Two implementations of one small surface — ``save``, ``get``,
-``list``, plus the same trio for statement reconciliations
-and for payment runs — because the deployment gets PostgreSQL
-and the test suite gets a double with identical behaviour:
+``list``, plus the same trio for statement reconciliations,
+payment runs, and remittance confirmations — because the
+deployment gets PostgreSQL and the test suite gets a double
+with identical behaviour:
 
 - :class:`PostgresRecordStore` — the production store (JSONB
-  payloads in the ``records``, ``reconciliations``, and
-  ``payment_runs`` tables; migrations ``0001``–``0003``).
+  payloads in the ``records``, ``reconciliations``,
+  ``payment_runs``, and ``confirmations`` tables; migrations
+  ``0001``–``0004``).
 - :class:`InMemoryRecordStore` — the double. When it is live,
   ``/readiness`` says so: nothing persists past the process.
 
@@ -27,6 +29,7 @@ from .db import database_url, ensure_migrated
 from .schemas import (
     DocumentRecord,
     GoodsReceipt,
+    PaymentConfirmation,
     PaymentRun,
     PurchaseOrder,
     Reconciliation,
@@ -69,6 +72,8 @@ class InMemoryRecordStore:
         self._recon_order: list[str] = []
         self._runs: dict[str, PaymentRun] = {}
         self._run_order: list[str] = []
+        self._confirmations: dict[str, PaymentConfirmation] = {}
+        self._confirmation_order: list[str] = []
         self._lock = threading.Lock()
         self.reference = ReferenceData()
 
@@ -123,6 +128,30 @@ class InMemoryRecordStore:
         if status:
             runs = [r for r in runs if r.status == status]
         return runs
+
+    def save_confirmation(
+        self, confirmation: PaymentConfirmation
+    ) -> PaymentConfirmation:
+        with self._lock:
+            if confirmation.confirmation_id not in self._confirmations:
+                self._confirmation_order.append(confirmation.confirmation_id)
+            self._confirmations[confirmation.confirmation_id] = confirmation
+        return confirmation
+
+    def get_confirmation(
+        self, confirmation_id: str
+    ) -> PaymentConfirmation | None:
+        return self._confirmations.get(confirmation_id)
+
+    def list_confirmations(
+        self, run_id: str | None = None
+    ) -> list[PaymentConfirmation]:
+        confirmations = [
+            self._confirmations[cid] for cid in self._confirmation_order
+        ]
+        if run_id:
+            confirmations = [c for c in confirmations if c.run_id == run_id]
+        return confirmations
 
 
 class PostgresRecordStore:
@@ -258,6 +287,55 @@ class PostgresRecordStore:
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [PaymentRun.model_validate(row["payload"]) for row in rows]
+
+    def save_confirmation(
+        self, confirmation: PaymentConfirmation
+    ) -> PaymentConfirmation:
+        from psycopg.types.json import Jsonb
+
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO confirmations "
+                "(confirmation_id, advice_record_id, run_id, payload, status) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (confirmation_id) DO UPDATE SET payload = EXCLUDED.payload, "
+                "status = EXCLUDED.status, run_id = EXCLUDED.run_id, "
+                "updated_at = now()",
+                (
+                    confirmation.confirmation_id,
+                    confirmation.advice_record_id,
+                    confirmation.run_id,
+                    Jsonb(json.loads(confirmation.model_dump_json())),
+                    confirmation.status,
+                ),
+            )
+            conn.commit()
+        return confirmation
+
+    def get_confirmation(
+        self, confirmation_id: str
+    ) -> PaymentConfirmation | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM confirmations WHERE confirmation_id = %s",
+                (confirmation_id,),
+            ).fetchone()
+        return PaymentConfirmation.model_validate(row["payload"]) if row else None
+
+    def list_confirmations(
+        self, run_id: str | None = None
+    ) -> list[PaymentConfirmation]:
+        query = "SELECT payload FROM confirmations"
+        params: tuple = ()
+        if run_id:
+            query += " WHERE run_id = %s"
+            params = (run_id,)
+        query += " ORDER BY seq"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            PaymentConfirmation.model_validate(row["payload"]) for row in rows
+        ]
 
 
 def default_store() -> InMemoryRecordStore | PostgresRecordStore:

@@ -19,6 +19,11 @@ gate discipline:
   named — and stop at a treasurer's gate. Release generates
   the bank-instruction export once and locks the batch;
   return frees every member. Neither pays anything.
+- remittance confirmation closes the loop: a bank advice is
+  reconciled against the released run it names, line by line,
+  in code — exactly, never within a tolerance — and stops at
+  a controller's gate. An advice that names no run on file is
+  held UNMATCHED, never guessed onto one.
 """
 
 from __future__ import annotations
@@ -29,7 +34,19 @@ from datetime import datetime, timezone
 
 from langgraph.types import Command
 
-from .errors import GateError, PaymentRunError, ReconciliationError, RecordNotFound
+from .confirmations import (
+    OVERLAY_BY_CLASS,
+    reconcile_confirmation,
+    resolve_run_reference,
+    unmatched_confirmation,
+)
+from .errors import (
+    ConfirmationError,
+    GateError,
+    PaymentRunError,
+    ReconciliationError,
+    RecordNotFound,
+)
 from .graph import ApPipeline
 from .payments import (
     PAYABLE_CLASSES,
@@ -42,6 +59,7 @@ from .reconciliation import reconcile_statement
 from .schemas import (
     ControllerDecision,
     DocumentRecord,
+    PaymentConfirmation,
     PaymentLine,
     PaymentPacket,
     PaymentRun,
@@ -388,3 +406,140 @@ class ApService:
                 f"export artifact {run.export_key} for run {run_id} is "
                 "missing from the object store"
             ) from None
+
+    # -- remittance confirmation ---------------------------------
+
+    def confirm_remittance(self, advice_record_id: str) -> PaymentConfirmation:
+        """Reconcile one remittance advice against the payment
+        run it answers.
+
+        The run is the one the advice names — its header's
+        reference, or one run named unanimously by its lines.
+        An advice naming no run, a run that is not on file, or
+        a run the treasurer has not released is held UNMATCHED
+        on its confirmation record with the reason named; it is
+        never guessed onto a run. A matched confirmation writes
+        its own record and the confirmation overlay on each
+        member it classifies — the run, its decision, its
+        export, and every approval are left exactly as they
+        were."""
+        record = self.get_record(advice_record_id)
+        if record.doc_class != "remittance_advice":
+            raise ConfirmationError(
+                f"record {advice_record_id} is a {record.doc_class}, not a "
+                "remittance advice — only advices confirm payment runs"
+            )
+        if record.extraction is None:
+            raise ConfirmationError(
+                f"remittance advice {advice_record_id} carries no captured "
+                "extraction; its paid lines were never read"
+            )
+        existing = [
+            c for c in self.store.list_confirmations()
+            if c.advice_record_id == advice_record_id
+        ]
+        confirmation_id = f"CONF-{advice_record_id}"
+        if existing:
+            confirmation_id = f"{confirmation_id}-{len(existing) + 1}"
+
+        run_id, why_not = resolve_run_reference(record.extraction)
+        if run_id is None:
+            return self.store.save_confirmation(unmatched_confirmation(
+                confirmation_id, record, why_not, created_at=_now(),
+            ))
+        run = self.store.get_payment_run(run_id)
+        if run is None:
+            return self.store.save_confirmation(unmatched_confirmation(
+                confirmation_id, record,
+                f"the advice names payment run {run_id}, which is not on "
+                "file — an advice is never guessed onto a run it did "
+                "not name",
+                created_at=_now(),
+            ))
+        if run.status != "RELEASED":
+            return self.store.save_confirmation(unmatched_confirmation(
+                confirmation_id, record,
+                f"the advice names payment run {run_id}, which is "
+                f"{run.status} — confirmations answer released runs, "
+                "because only a released run has proposed payments "
+                "that could have left the bank",
+                created_at=_now(),
+            ))
+
+        confirmation = reconcile_confirmation(
+            confirmation_id, record, run, created_at=_now(),
+        )
+        saved = self.store.save_confirmation(confirmation)
+        for line in confirmation.lines:
+            overlay = OVERLAY_BY_CLASS[line.classification]
+            if overlay is None or line.member_record_id is None:
+                continue
+            member = self.get_record(line.member_record_id)
+            member.payment_confirmation = overlay
+            member.payment_confirmation_id = saved.confirmation_id
+            member.audit.append({
+                "event": "payment_confirmation_recorded", "at": _now(),
+                "detail": (
+                    f"remittance confirmation {saved.confirmation_id} "
+                    f"(advice {advice_record_id}) classifies this member "
+                    f"{line.classification} against run {run.run_id}"
+                ),
+            })
+            member.updated_at = _now()
+            self.store.save(member)
+        return saved
+
+    def get_confirmation(self, confirmation_id: str) -> PaymentConfirmation:
+        confirmation = self.store.get_confirmation(confirmation_id)
+        if confirmation is None:
+            raise RecordNotFound(f"no confirmation {confirmation_id}")
+        return confirmation
+
+    def list_confirmations(
+        self, run_id: str | None = None
+    ) -> list[PaymentConfirmation]:
+        return self.store.list_confirmations(run_id=run_id)
+
+    def decide_confirmation(
+        self, confirmation_id: str, action: str, actor: str, note: str = ""
+    ) -> PaymentConfirmation:
+        """The controller's word on a confirmation: accept it,
+        or flag it back with a note the AP team works from.
+        An UNMATCHED confirmation cannot be decided — there is
+        nothing to accept until an advice names a released run
+        on file and is reconciled against it."""
+        if action not in ("accept", "flag_back"):
+            raise GateError(
+                f"controller action must be 'accept' or 'flag_back', got {action!r}"
+            )
+        if not actor or not actor.strip():
+            raise GateError("a controller decision must name its controller")
+        if action == "flag_back" and not (note and note.strip()):
+            raise GateError(
+                "flagging a confirmation back requires a note — the AP "
+                "team takes it to the bank"
+            )
+        confirmation = self.get_confirmation(confirmation_id)
+        if confirmation.status == "UNMATCHED":
+            raise GateError(
+                f"confirmation {confirmation_id} is UNMATCHED — "
+                f"{confirmation.unmatched_reason}; there is nothing to "
+                "decide until an advice names a released run on file"
+            )
+        if confirmation.status != "AWAITING_CONTROLLER":
+            raise GateError(
+                f"confirmation {confirmation_id} is {confirmation.status}; "
+                "only AWAITING_CONTROLLER confirmations can be decided"
+            )
+        confirmation.decision = ControllerDecision(
+            decision=action, actor=actor, note=note, at=_now()  # type: ignore[arg-type]
+        )
+        confirmation.status = (
+            "ACCEPTED" if action == "accept" else "FLAGGED_BACK"
+        )
+        confirmation.audit.append({
+            "event": "controller_decision", "at": _now(),
+            "detail": f"{action} by {actor}" + (f" — {note}" if note else ""),
+        })
+        confirmation.updated_at = _now()
+        return self.store.save_confirmation(confirmation)
