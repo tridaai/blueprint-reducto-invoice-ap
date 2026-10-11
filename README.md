@@ -142,10 +142,62 @@ submission ──► intake ──► split & classify ──► extract ──�
   LangGraph interrupt, checkpointed in Postgres, until a named
   approver approves or rejects with a reason. Fraud-held and
   exception records cannot be decided at the gate at all.
-- **The packet** — a read model over approved records: proposed
-  payments by supplier and currency, credit notes netted as
-  negative lines. Generating it moves no money; this system has
-  no code path that could.
+- **The packet** — a read model over approved invoices:
+  proposed payments by supplier and currency, each at its
+  **open amount** — the approved face minus the credit notes
+  applied against it, listed on the line — plus the approved
+  credits still unapplied, with the reason each one waits.
+  Generating it moves no money; this system has no code path
+  that could.
+
+## Credit notes
+
+An invoice says what AP owes; a credit note is the supplier
+saying some of it is owed back. A credit that lives outside
+the payable math is an overpayment waiting for a batch to
+carry it, so credits here are **applied, in code, against the
+invoice they name**:
+
+- **The document names its invoice.** Both adapters extract
+  the credit's own reference (a *Credits Invoice* field). A
+  credit naming no invoice, or one that is not on file, is
+  held `UNAPPLIED` with the reason named — it is never matched
+  to an invoice by amount similarity, because amount-matching
+  is exactly how double-crediting happens: two credits for the
+  same amount both "fit" one invoice, and the payable falls
+  twice for one debt.
+- **Application is a controller's act.** A named controller
+  applies an approved credit against its approved invoice. The
+  application is recorded on the invoice's ledger; the credit
+  flips to `APPLIED`, pointing back. Partial coverage is the
+  normal case and tracked cumulatively — several credits can
+  land on one invoice, each applied in full, to the cent, with
+  no tolerance. A credit larger than the open amount is
+  refused `OVER_CREDIT` with both figures, and a credit note
+  is never split across applications. A credit against a
+  fraud-held record is refused with the hold named.
+- **The approved amount never changes.** The invoice's face is
+  history — an approver approved that figure. What moves is
+  the derived **open amount**: face minus applied credits. The
+  packet proposes it, payment runs pay it, the bank export
+  instructs it — one amount rule, computed once in
+  `credits.py`.
+- **A credit never joins a payment run.** It is not a negative
+  payment instruction; its reduction stands inside the
+  invoice's amount, whichever batch the invoice lands in. A
+  fully credited invoice is refused by the run
+  `FULLY_CREDITED`, with the credits named — excluded in the
+  open, not silently dropped.
+- **Late credits are refused by name.** Against an invoice
+  held by an open run: `TARGET_IN_RUN`. Against one already
+  released (`PAID_PROPOSED`): refused terminally — that
+  money's story belongs to the run and its remittance
+  confirmation, and the credit cannot rewrite it. It stays on
+  file, unapplied, on the packet with its reason: next cycle's
+  business, settled against the supplier's future invoices.
+  (Carrying a supplier credit balance forward is a ledger
+  this blueprint deliberately does not build — see Honest
+  status.)
 
 ## Supplier statement reconciliation
 
@@ -184,7 +236,7 @@ by line. That is the second workflow through the same port:
 
 The packet proposes; a payment run is how a batch becomes
 controlled. A treasurer assembles a run for a value date — named
-records, or every approved payable record — and the assembly is
+records, or every approved invoice — and the assembly is
 the control:
 
 - **One open run per record.** Assembly holds each member on
@@ -193,13 +245,20 @@ the control:
   record from a released run is refused forever: it is already
   in a bank export, and paying twice is the failure this exists
   to prevent.
+- **Members are invoices, at their open amounts.** The credits
+  applied against a member ride its line, so the treasurer
+  sees why the figure that will leave the bank differs from
+  the invoice's face; the export instructs the net figure, so
+  the run's total is the sum of what actually leaves. A credit
+  note offered as a member is refused by name, and so is a
+  fully credited invoice (`FULLY_CREDITED`) — nothing is
+  silently dropped.
 - **Nothing ineligible slips in quietly.** Fraud-held and
   exception records can never enter a run; asking for them
   produces a named refusal (code + reason) while the run
   assembles from the eligible remainder. Totals are computed
   from the member lines and tied back against them before the
-  run exists — credit notes net exactly as they do in the
-  packet.
+  run exists.
 - **The treasurer's gate.** The run ends `AWAITING_TREASURER`.
   A named treasurer **releases** it or **returns** it (a reason
   is required to return; the AP team reworks on it). Returning
@@ -311,6 +370,13 @@ binary and does not pretend to.
   deployment that seam loads the ERP's mirrors instead.
 - The payment packet is a proposal for the customer's AP
   system of record. Executing payments stays there, by design.
+- A credit that arrives after its invoice was released in a
+  payment run is refused and stays unapplied in this system.
+  Settling it against the supplier's *next* invoice — the
+  real-world handling — needs a supplier credit-balance
+  ledger, which this blueprint deliberately does not build;
+  the credit, its amount, and its refusal reason stay visible
+  on the packet rather than disappearing.
 
 ## Evaluations
 
@@ -331,13 +397,22 @@ gates on it:
   every class and each must land in its exact class; a second
   statement must reconcile fully; statement totals must tie;
   and no document record may change as a result of reconciling.
-- **Payment runs** — a batch over two approved invoices and
-  the netting credit note must tie its totals; the fraud hold
-  and an exception must be refused by name; a member of an
-  open run must be refused with the holding run named; return
-  must free the members; and the released export must be
-  byte-stable and carry only the supplier master's bank
-  details.
+- **Payment runs** — a batch over approved invoices (one at
+  its net open amount, its credit applied in code first) must
+  tie its totals; the fraud hold and an exception must be
+  refused by name; a member of an open run must be refused
+  with the holding run named; return must free the members;
+  and the released export must be byte-stable and carry only
+  the supplier master's bank details.
+- **Credit application** — a credit must land only against
+  the invoice its document names: applied, it nets the
+  invoice's open amount with the face and the approval
+  untouched; a full cover must exclude its invoice from a run
+  by name; an over-credit, a credit naming no invoice, one
+  naming an invoice not on file, one against the fraud hold,
+  and the late credit against a paid-proposed invoice must
+  each be refused with their reasons; and the released export
+  must instruct the net figure with no credit line of its own.
 - **Remittance confirmation** — the bank's answer to a
   released run must classify line by line (exact, short,
   over, missing, one line the run never contained); the
@@ -359,6 +434,7 @@ src/reducto_ap_agent/
   engine_api.py    the VPC demo stack's internal engine stand-in
   profiles.py      cloud vs vpc, resolved in code
   matching.py      the three-way match, in code
+  credits.py       credit application + the open amount, in code
   reconciliation.py statement vs AP records, line by line, in code
   payments.py      run assembly, the refusals, the bank export, in code
   confirmations.py remittance vs the released run, line by line, in code

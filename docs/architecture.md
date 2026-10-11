@@ -196,13 +196,68 @@ exceptions cannot, and a decision is final (the record leaves
 the awaiting set; corrections are new submissions, matching how
 AP actually works).
 
-The payment packet is a read model over `APPROVED` records —
-supplier, invoice number, currency, amount, credit notes as
-negative lines, totals per currency. It is generated on read,
-never stored as a mutable balance, and the system contains no
-code path that executes a payment: the packet is the input to
-the customer's AP system of record, where payment execution,
-with its own controls, already lives.
+The payment packet is a read model over `APPROVED` invoices —
+supplier, invoice number, currency, and the invoice's **open
+amount** (below), with the credits that produced it listed on
+the line, totals per currency — plus the approved credit
+notes still unapplied, each with the reason it waits. It is
+generated on read, never stored as a mutable balance, and the
+system contains no code path that executes a payment: the
+packet is the input to the customer's AP system of record,
+where payment execution, with its own controls, already
+lives.
+
+## Credit application
+
+`credits.py` owns the credit discipline; the service exposes
+it as `apply_credit`, the API as `POST /credits/{id}/apply`,
+and no migration was needed — applications ride the records'
+JSONB payloads (the invoice's `credits_applied` ledger, the
+credit's `credit_state` + `applied_invoice_record_id`).
+
+**Reference, never resemblance.** A credit note's extraction
+carries `credited_invoice_number` — the invoice its own
+document names. Resolution looks that number up among the
+credit supplier's invoice records (a live copy wins over a
+dead duplicate; the one `APPROVED` copy wins among live ones).
+A credit naming no invoice (`NO_INVOICE_REFERENCE`) or one
+not on file (`INVOICE_NOT_ON_FILE`) is held `UNAPPLIED` with
+the reason named, on the record's surfaces and on the packet.
+Nothing in the credit path matches by amount: two credits of
+the same amount against one invoice would both "fit", and
+the payable would fall twice for one debt — amount-matching
+is precisely the failure this design refuses to automate.
+
+**Application.** Both sides must be `APPROVED`: the credit
+(an unverified document moves no money; a fraud-held credit
+is refused `CREDIT_NOT_APPROVED` with the hold in the words)
+and its invoice (`TARGET_NOT_APPROVED`; a fraud-held target
+is `TARGET_FRAUD_HOLD` — netting must not become a way to
+touch a held record). Currencies must agree
+(`CURRENCY_MISMATCH`): a credit reduces a payable in the
+payable's own currency. The credit applies whole, to the
+cent, or not at all — `OVER_CREDIT` names both figures when
+it exceeds the open amount; there is no partial application
+of a single credit note, because a half-applied note invites
+applying the other half twice. Partial *coverage* is the
+normal case and accumulates on the ledger.
+
+**Open amount.** `open_amount(record)` = extraction total −
+Σ ledger. The face never changes (the approver's figure is
+history); the open amount is the derived figure the packet,
+the runs, and the export read — one computation, in
+`credits.py`, reused by all three, the way round 3 reused the
+packet's amounts before it.
+
+**Late credits.** The target's payment state is a hard
+boundary, checked before the money: `TARGET_IN_RUN` (the open
+run was assembled on the open amount at assembly time; it is
+returned or released as assembled) and `TARGET_PAID_PROPOSED`
+(terminal — the run and its confirmation own that money's
+story, and a later reduction would falsify both). The credit
+stays `UNAPPLIED` and visible; settling it against the
+supplier's future invoices is a credit-balance ledger this
+blueprint deliberately does not build.
 
 ## Statement reconciliation
 
@@ -277,16 +332,24 @@ runs their own table in the same JSONB idiom.
 scoped to currencies, from named record ids (in the order
 named; an unknown id fails the whole assembly loudly — a
 mistyped id must never silently shrink a batch) or, unnamed,
-from every `APPROVED` invoice and credit note — the packet's
-universe. Each candidate is either a member or a named refusal:
+from every `APPROVED` invoice — the packet's universe. Each
+candidate is either a member or a named refusal:
 
-- `NOT_PAYABLE_CLASS` — not an invoice or credit note;
+- `CREDIT_NOTE` — a credit note, refused in its own words:
+  applied (its reduction already stands in its invoice's open
+  amount) or unapplied (apply it first); a credit is applied
+  against an invoice, never paid as a negative instruction,
+  so the netting holds whichever batch the invoice lands in;
+- `NOT_PAYABLE_CLASS` — not an invoice;
 - `FRAUD_HOLD` — on fraud review, with the record's flags in
   the reason; fraud is cleared in the supplier master, never
   by a batch;
 - `MATCH_EXCEPTION` — carries an open exception, codes named;
 - `NOT_APPROVED` — awaiting the gate, rejected, or otherwise
   not finally approved;
+- `FULLY_CREDITED` — approved, but applied credits bring its
+  open amount to 0.00 (the credits are named in the reason);
+  excluded in the open rather than carried as a zero line;
 - `ALREADY_IN_RUN` — held by an open run, which is named;
   a record belongs to at most one open run;
 - `ALREADY_PAID_PROPOSED` — released in an earlier run, also
@@ -296,10 +359,12 @@ universe. Each candidate is either a member or a named refusal:
 
 Zero eligible records fails assembly (`PaymentRunError`, 422):
 an empty batch is an operator error, not a run. Member amounts
-are the packet's amounts — the extraction total, credit notes
-negative — and the per-currency totals are tied back against
-the member lines before the run is stored; a batch whose
-header disagrees with its contents is never written.
+are the packet's amounts — the open amount, face minus applied
+credits, with the credits listed on the member line — and the
+per-currency totals are tied back against the member lines
+before the run is stored; a batch whose header disagrees with
+its contents is never written. The export therefore instructs
+net figures, and its total is the net sum by construction.
 
 **Membership, honestly named.** A member's record keeps its
 `APPROVED` status — that is the approver's decision, and the
