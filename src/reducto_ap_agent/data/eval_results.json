@@ -1,7 +1,7 @@
 {
   "backend": "offline",
-  "cases": 17,
-  "passed": 17,
+  "cases": 22,
+  "passed": 22,
   "match_decision_accuracy": 1.0,
   "extraction_accuracy_by_field": {
     "invoice_number": 1.0,
@@ -11,11 +11,35 @@
   "fraud_cases": 1,
   "fraud_caught": 1,
   "review_queue_precision": 1.0,
+  "statement_reconciliation": {
+    "breaks_counts": {
+      "matched": 1,
+      "amount_disagrees": 1,
+      "missing_in_ap": 1,
+      "missing_on_statement": 1,
+      "duplicates_within_statement": 1
+    },
+    "clean_counts": {
+      "matched": 2,
+      "amount_disagrees": 0,
+      "missing_in_ap": 0,
+      "missing_on_statement": 0,
+      "duplicates_within_statement": 0
+    },
+    "breaks_exact": true,
+    "clean_reconciles_fully": true,
+    "totals_tie": true,
+    "records_untouched": true
+  },
   "failures": [],
   "gates": {
     "match_decision_accuracy == 1.0": true,
     "fraud_misses == 0": true,
-    "citation_presence == 1.0": true
+    "citation_presence == 1.0": true,
+    "statement_breaks_classified_exactly": true,
+    "clean_statement_reconciles_fully": true,
+    "statement_totals_tie": true,
+    "reconciliation_left_records_untouched": true
   },
   "gate_passed": true
 }

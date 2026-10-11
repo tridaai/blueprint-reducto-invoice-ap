@@ -145,6 +145,39 @@ submission ──► intake ──► split & classify ──► extract ──�
   negative lines. Generating it moves no money; this system has
   no code path that could.
 
+## Supplier statement reconciliation
+
+Invoices are only half of AP's document life. Every month the
+supplier sends a statement — their list of what they believe is
+still open — and somebody has to prove it right or wrong, line
+by line. That is the second workflow through the same port:
+
+- **Intake** — a statement arrives like any other document and
+  is **refused by the payment path**, exactly as before. But its
+  open-item lines (invoice number, date, amount, currency) are
+  extracted through the DocumentPort and captured on the record
+  first, so reconciliation works from records, not raw files.
+- **Reconciliation in code** — `reconciliation.py` joins the
+  statement's lines against AP's live invoice records for that
+  supplier. Every line lands in exactly one class: `matched`,
+  `amount_disagrees` (both figures shown, never collapsed),
+  `missing_in_ap` (the classic "never received it"),
+  `missing_on_statement` (AP holds it; the supplier no longer
+  lists it), or `duplicates_within_statement`. Amounts agree or
+  disagree by the match policy's total tolerance — the same
+  policy module as the three-way match, no second set of
+  numbers. The statement's own stated total is tied against the
+  sum of its lines; if the statement's arithmetic is the break,
+  that is named on the reconciliation.
+- **The controller gate** — a reconciliation is a stored record
+  ending `AWAITING_CONTROLLER`. A named controller accepts it,
+  or flags it back with a note the AP team takes to the
+  supplier; decisions are audited and final.
+- **Evidence, never action** — computing or deciding a
+  reconciliation changes no document record and no packet line.
+  It cannot approve, alter, or exclude an invoice; the eval
+  pack pins that invariance.
+
 ## Configuration
 
 Provider-first: the standard run is Reducto. Copy `.env.example`
@@ -200,6 +233,10 @@ gates on it:
 - **Fraud recall — zero misses tolerated.** The planted
   bank-change case must land on FRAUD_REVIEW; a single miss
   fails the pack.
+- **Statement reconciliation** — one statement plants a break of
+  every class and each must land in its exact class; a second
+  statement must reconcile fully; statement totals must tie;
+  and no document record may change as a result of reconciling.
 
 Live-Reducto eval runs are opt-in (`EVAL_LIVE=1` with a key)
 and reported, not gated.
@@ -214,6 +251,7 @@ src/reducto_ap_agent/
   engine_api.py    the VPC demo stack's internal engine stand-in
   profiles.py      cloud vs vpc, resolved in code
   matching.py      the three-way match, in code
+  reconciliation.py statement vs AP records, line by line, in code
   guardrails.py    bank-detail, payable, and injection screens
   policy.py        every tolerance, in one module
   graph.py         the LangGraph pipeline and its gate

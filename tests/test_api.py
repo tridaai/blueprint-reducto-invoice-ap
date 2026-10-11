@@ -49,7 +49,7 @@ def test_seed_decide_packet_flow(client):
     seeded = client.post("/demo/seed")
     assert seeded.status_code == 201
     records = client.get("/records").json()
-    assert len(records) == 17
+    assert len(records) == 22
     fraud = [r for r in records if r["status"] == "FRAUD_REVIEW"]
     assert len(fraud) == 1 and fraud[0]["record_id"] == "REC-SUB-008-0"
 

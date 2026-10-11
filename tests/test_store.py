@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from reducto_ap_agent import db
-from reducto_ap_agent.schemas import DocumentRecord
+from reducto_ap_agent.schemas import DocumentRecord, Reconciliation
 from reducto_ap_agent.store import InMemoryRecordStore
 
 
@@ -18,6 +18,37 @@ def test_in_memory_store_round_trip_and_order():
     assert store.get("REC-1").status == "APPROVED"
     assert [r.record_id for r in store.list(status="APPROVED")] == ["REC-1", "REC-2"]
     assert store.get("REC-MISSING") is None
+
+
+def test_in_memory_store_reconciliation_round_trip():
+    store = InMemoryRecordStore()
+    recon = Reconciliation(
+        reconciliation_id="RECON-REC-1", statement_record_id="REC-1",
+        submission_id="SUB-1", supplier_id="SUP-01",
+    )
+    store.save_reconciliation(recon)
+    store.save_reconciliation(
+        Reconciliation(
+            reconciliation_id="RECON-REC-2", statement_record_id="REC-2",
+            submission_id="SUB-2", supplier_id="SUP-02",
+        )
+    )
+    assert store.get_reconciliation("RECON-REC-1") == recon
+    assert store.get_reconciliation("RECON-MISSING") is None
+    assert [r.reconciliation_id for r in store.list_reconciliations()] == [
+        "RECON-REC-1", "RECON-REC-2",
+    ]
+    assert [
+        r.reconciliation_id
+        for r in store.list_reconciliations(supplier_id="SUP-02")
+    ] == ["RECON-REC-2"]
+    # Re-saving (a controller decision) keeps position, updates payload.
+    decided = recon.model_copy(update={"status": "ACCEPTED"})
+    store.save_reconciliation(decided)
+    assert [r.reconciliation_id for r in store.list_reconciliations()] == [
+        "RECON-REC-1", "RECON-REC-2",
+    ]
+    assert store.get_reconciliation("RECON-REC-1").status == "ACCEPTED"
 
 
 def test_migrations_are_numbered_and_runner_is_safe_without_a_database(monkeypatch):

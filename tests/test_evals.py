@@ -23,4 +23,9 @@ def test_eval_gates_pass_on_the_golden_world():
     assert results["citation_presence"] == 1.0
     assert results["extraction_accuracy_by_field"]["invoice_number"] == 1.0
     assert results["extraction_accuracy_by_field"]["total"] == 1.0
-    assert results["cases"] == 17  # 16 submissions, one bundle of two
+    assert results["cases"] == 22  # 21 submissions, one bundle of two
+    recon = results["statement_reconciliation"]
+    assert recon["breaks_exact"]
+    assert recon["clean_reconciles_fully"]
+    assert recon["totals_tie"]
+    assert recon["records_untouched"]

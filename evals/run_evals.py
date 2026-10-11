@@ -14,7 +14,11 @@ Gates (a failure exits non-zero):
 - fraud recall — ZERO misses tolerated: the planted bank-change
   case must land on FRAUD_REVIEW;
 - citation presence — every extracted field on a payable record
-  carries a citation.
+  carries a citation;
+- statement reconciliation — every planted break lands in its
+  exact class, the clean statement reconciles fully, statement
+  totals tie, and reconciling leaves every document record —
+  and therefore the payment packet — untouched.
 
 Reported, not gated: per-field extraction accuracy, review-queue
 precision. A live run (EVAL_LIVE=1, DOCUMENT_BACKEND=reducto,
@@ -112,6 +116,62 @@ def evaluate(service: ApService) -> dict:
                 "failures": failures,
             })
 
+    # -- statement reconciliation --------------------------------
+    # Runs after every submission is processed, so the statements
+    # reconcile against the whole AP picture. Gold: SUB-020's
+    # statement plants one break of each class, in order; SUB-021's
+    # agrees with AP to the cent.
+    snapshot = {
+        r.record_id: (r.status, r.decision, r.match) for r in service.list_records()
+    }
+    breaks = service.reconcile("REC-SUB-020-0")
+    clean = service.reconcile("REC-SUB-021-0")
+    after = {
+        r.record_id: (r.status, r.decision, r.match) for r in service.list_records()
+    }
+    expected_sequence = [
+        ("INV-2001", "matched"),
+        ("INV-2002", "amount_disagrees"),
+        ("INV-2999", "missing_in_ap"),
+        ("INV-2001", "duplicates_within_statement"),
+        ("INV-2003", "missing_on_statement"),
+    ]
+    actual_sequence = [
+        (line.invoice_number, line.classification) for line in breaks.lines
+    ]
+    disagrees = next(
+        (l for l in breaks.lines if l.classification == "amount_disagrees"), None
+    )
+    breaks_exact = (
+        actual_sequence == expected_sequence
+        and disagrees is not None
+        and disagrees.statement_amount == 440.00
+        and disagrees.ap_amount == 400.00
+        and breaks.counts == {
+            "matched": 1, "amount_disagrees": 1, "missing_in_ap": 1,
+            "missing_on_statement": 1, "duplicates_within_statement": 1,
+        }
+    )
+    clean_full = (
+        len(clean.lines) == 2
+        and all(l.classification == "matched" for l in clean.lines)
+        and clean.counts["matched"] == 2
+        and sum(clean.counts.values()) == 2
+    )
+    totals_tie = (
+        breaks.totals_tie and clean.totals_tie
+        and not breaks.flags and not clean.flags
+    )
+    records_untouched = snapshot == after
+    statement_results = {
+        "breaks_counts": breaks.counts,
+        "clean_counts": clean.counts,
+        "breaks_exact": breaks_exact,
+        "clean_reconciles_fully": clean_full,
+        "totals_tie": totals_tie,
+        "records_untouched": records_untouched,
+    }
+
     total_cases = len(cases)
     passed = sum(1 for c in cases if c["passed"])
     results = {
@@ -129,12 +189,17 @@ def evaluate(service: ApService) -> dict:
         "review_queue_precision": (
             queue_actual_correct / queue_should if queue_should else None
         ),
+        "statement_reconciliation": statement_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
         "match_decision_accuracy == 1.0": results["match_decision_accuracy"] == 1.0,
         "fraud_misses == 0": fraud_caught == fraud_total,
         "citation_presence == 1.0": results["citation_presence"] == 1.0,
+        "statement_breaks_classified_exactly": breaks_exact,
+        "clean_statement_reconciles_fully": clean_full,
+        "statement_totals_tie": totals_tie,
+        "reconciliation_left_records_untouched": records_untouched,
     }
     results["gate_passed"] = all(results["gates"].values())
     return results

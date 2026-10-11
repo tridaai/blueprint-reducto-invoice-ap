@@ -109,7 +109,9 @@ intake → process → gate (interrupt) → apply
 - **process** — per sub-document from the split: attachments
   (remittance advices, delivery notes) are stored and recorded
   as RECEIVED, never extracted for payment; non-payable classes
-  are REFUSED with the reason on the record; payable documents
+  are REFUSED with the reason on the record — a statement first
+  has its open-item lines extracted and captured on the record,
+  because reconciliation (below) reads them; payable documents
   are extracted, screened (bank details), matched, and checked
   for duplicates against live records. Terminal states from
   this node: `RECEIVED`, `REFUSED`, `FRAUD_REVIEW`,
@@ -200,11 +202,72 @@ code path that executes a payment: the packet is the input to
 the customer's AP system of record, where payment execution,
 with its own controls, already lives.
 
+## Statement reconciliation
+
+The second document workflow, and the reason statements are
+extracted at all. It runs entirely off records:
+
+**Intake.** The pipeline classifies a statement and the payable
+screen refuses it — `NOT_PAYABLE_DOCUMENT`, unchanged from the
+payment path's point of view. Before the refusal lands, the
+pipeline extracts the statement through the same DocumentPort
+and resolves its supplier, so the record carries the open-item
+lines (`StatementLine`: number, date, amount, currency) plus
+the statement's period and stated total. Other refused classes
+(letters, standalone delivery notes) are not extracted — only
+statements have a second path waiting for their contents.
+
+**The join.** `reconciliation.py` compares the statement's
+lines with AP's live invoice records for that supplier — live
+meaning received and not finally disposed of: awaiting the
+gate, approved, exception, and fraud-held records count (AP is
+acting on the amount); rejected ones do not (the supplier was
+told no). Classes, exactly one per line:
+
+- statement side: `matched` · `amount_disagrees` ·
+  `missing_in_ap` · `duplicates_within_statement` (the first
+  occurrence of a number reconciles; repeats are the break);
+- AP side: `missing_on_statement`, for live invoices the
+  statement never lists.
+
+An amount agrees when it sits inside the match policy's total
+tolerance — `policy.py` again, because "the amount matches"
+should mean one thing in this system. A currency difference is
+an `amount_disagrees` with the reason named; figures in
+different currencies are not compared at all. The statement's
+stated total is tied against the sum of its lines at the same
+tolerance; a statement whose own arithmetic fails is flagged
+`STATEMENT_TOTAL_MISMATCH` (or `STATEMENT_TOTAL_MISSING` when
+it states no total) before any comparison with AP is trusted.
+
+**The controller gate.** A reconciliation is a stored record
+(`AWAITING_CONTROLLER` → `ACCEPTED` | `FLAGGED_BACK`) with a
+summary — counts and totals per class — and an append-only
+audit trail. The controller's discipline mirrors the approver
+gate's: the actor is required, flagging back requires a note,
+and a decision is final; a corrected statement arrives as a
+new submission and reconciles afresh (a re-reconciliation of
+the same statement is a new record, never an edit).
+
+**Invariance.** Reconciliation reads document records and
+writes only its own table. It has no path to approve, alter,
+or exclude an invoice, so the payment packet is bit-identical
+whether or not a reconciliation exists — the eval pack
+snapshots every record before and after reconciling and gates
+on nothing having moved.
+
+Surfaces: `POST /statements/{record_id}/reconcile`,
+`GET /reconciliations` (per supplier), the decision endpoint,
+the console's reconciliation panel (breaks itemised, the two
+figures side by side), and the CLI's `reconcile` command — all
+over the same service methods.
+
 ## Data services
 
 - **PostgreSQL** — the `records` table (one JSONB payload per
   record, status and supplier promoted to columns for the
-  queries the console runs) and the LangGraph Postgres
+  queries the console runs), the `reconciliations` table (same
+  pattern, migration `0002`), and the LangGraph Postgres
   checkpointer. Numbered migrations in `migrations/` run at
   startup; both stores share the one database.
 - **Object storage** — document bytes behind `ObjectStorePort`;
