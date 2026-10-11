@@ -37,13 +37,37 @@ def test_gate_approves_and_the_packet_proposes(seeded):
     assert packet.totals_by_currency["USD"] == 1400.00
 
 
-def test_credit_note_nets_negative_once_approved(seeded):
+def test_credit_note_reduces_its_invoice_once_applied(seeded):
     seeded.decide("REC-SUB-001-0", "approve", "Priya Nair (AP lead)")
     seeded.decide("REC-SUB-007-0", "approve", "Priya Nair (AP lead)")
+
+    # Approved but unapplied, the credit has reduced nothing:
+    # the invoice still proposes its full face, the credit is
+    # no packet line, and it waits on the unapplied list.
     packet = seeded.payment_packet()
     amounts = {line.invoice_number: line.amount for line in packet.lines}
-    assert amounts["CN-1001"] == -200.00
+    assert amounts["INV-1001"] == 1400.00
+    assert "CN-1001" not in amounts
+    (waiting,) = packet.unapplied_credits
+    assert waiting.credit_number == "CN-1001"
+    assert waiting.invoice_number == "INV-1001"
+    assert waiting.amount == 200.00
+
+    applied = seeded.apply_credit("REC-SUB-007-0", "Marta Chen (controller)")
+    assert applied.credit_state == "APPLIED"
+    assert applied.applied_invoice_record_id == "REC-SUB-001-0"
+
+    packet = seeded.payment_packet()
+    (line,) = [l for l in packet.lines if l.invoice_number == "INV-1001"]
+    assert line.amount == 1200.00  # the open amount is what is proposed
+    assert line.gross_amount == 1400.00  # the face rides along, unchanged
+    assert [c.credit_number for c in line.credits_applied] == ["CN-1001"]
     assert packet.totals_by_currency["USD"] == 1200.00
+    assert packet.unapplied_credits == []
+    # The invoice's history is untouched: same approval, same face.
+    invoice = seeded.get_record("REC-SUB-001-0")
+    assert invoice.status == "APPROVED"
+    assert float(invoice.extraction.value("total")) == 1400.00
     # A proposal only: the packet type carries no execution field.
     assert not hasattr(packet, "execute")
 

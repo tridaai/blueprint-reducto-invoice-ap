@@ -186,7 +186,7 @@ def run_demo() -> ApService:
         ("INV-1010", 650.00, "USD", "2026-10-17", "BNK-2026-3104"),   # over 50.00
         ("INV-1013", 1080.00, "EUR", "2026-10-17", "BNK-2026-3105"),  # exact
         ("INV-9999", 123.00, "USD", "2026-10-17", "BNK-2026-3106"),   # not a member
-        # INV-1014, INV-2001, INV-2002: no line — missing.
+        # INV-1014, INV-2001, INV-2002, INV-3001: no line — missing.
         # INV-2003 is not missing: it was fully credited and never
         # became a member — the run refused it by name above.
     ])

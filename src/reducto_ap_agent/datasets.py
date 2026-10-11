@@ -33,7 +33,11 @@ all and CN-9002 names one AP has never seen (both held
 unapplied, for different named reasons); CN-1007 credits the
 fraud-held invoice; CN-1003 credits INV-1001 too, and exists
 so a scenario can attempt it late — after its invoice has
-already been released in a payment run.
+already been released in a payment run. A second over-credit
+pair (INV-3001 / CN-3001, Ironclad) is planted for the eval
+scenario that runs after INV-2002 has already been consumed
+by the confirmation scenario — and Ironclad has no statement,
+so the pair disturbs no reconciliation gold.
 """
 
 from __future__ import annotations
@@ -360,5 +364,10 @@ def build_world() -> World:
        L("SKU-E1", "Pallet freight — service credit", 1, -150.00))
     cn("SUB-029", s02, "CN-1003", "PO-6001", "INV-1001", -100.00,
        L("SKU-A1", "Industrial valves — volume rebate", 1, -100.00))
+    add("SUB-030", _doc("INVOICE", 1, _inv_fields(s09, "INV-3001", "PO-6010", 600.00),
+                        [L("SKU-F1", "Torque wrenches", 8, 75.00)]),
+        [ExpectedDoc("invoice", "AWAITING_APPROVER", "INV-3001", 600.00, "MATCHED")])
+    cn("SUB-031", s09, "CN-3001", "PO-6010", "INV-3001", -650.00,
+       L("SKU-F1", "Torque wrenches — price correction, whole order", 1, -650.00))
 
     return World(suppliers=suppliers, purchase_orders=purchase_orders, receipts=receipts, submissions=subs)

@@ -20,7 +20,8 @@ Gates (a failure exits non-zero):
   totals tie, and reconciling leaves every document record —
   and therefore the payment packet — untouched.
 - payment runs — an assembled batch ties its totals to its
-  member lines (credit note netting included), refuses the
+  member lines (the invoice member at its net open amount —
+  its credit applied in code before assembly), refuses the
   fraud hold and the exception by name, refuses a held member
   with the holding run named, frees its members on return,
   and on release locks them as paid-proposed behind an export
@@ -34,6 +35,18 @@ Gates (a failure exits non-zero):
   UNMATCHED with their reasons, and a full confirmation
   cycle leaves the run, its export, and its members'
   approvals byte-identical.
+- credit application — a credit lands only against the
+  invoice its own document names: applied by a controller in
+  code it nets the invoice's open amount (the approved face
+  and the approval itself untouched, the credit listed on
+  the packet line and the run member), a full cover excludes
+  its invoice from a run by name (FULLY_CREDITED), and the
+  refusals are named — an over-credit with both figures, a
+  credit naming no invoice, one naming an invoice not on
+  file, one against the fraud-held invoice, and the late
+  credit against an invoice already paid-proposed. The
+  released export instructs the net figure and carries no
+  negative credit line.
 
 Reported, not gated: per-field extraction accuracy, review-queue
 precision. A live run (EVAL_LIVE=1, DOCUMENT_BACKEND=reducto,
@@ -52,6 +65,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from reducto_ap_agent.datasets import build_world, remittance_advice_doc  # noqa: E402
+from reducto_ap_agent.errors import GateError  # noqa: E402
 from reducto_ap_agent.graph import ApPipeline  # noqa: E402
 from reducto_ap_agent.object_store import InMemoryObjectStore  # noqa: E402
 from reducto_ap_agent.offline_docs import OfflineDocumentAdapter  # noqa: E402
@@ -191,21 +205,49 @@ def evaluate(service: ApService) -> dict:
     # -- payment runs ------------------------------------------
     # The controlled batch on top of the packet. Approvals are
     # recorded first (the run takes only APPROVED records);
-    # the planted set is two invoices + the netting credit
-    # note, the fraud hold, an exception, and a member already
-    # held by an open run.
+    # the planted set is two invoices + the credit note that
+    # credits one of them, the fraud hold, an exception, and a
+    # member already held by an open run.
     for record_id in (
         "REC-SUB-001-0", "REC-SUB-007-0", "REC-SUB-017-0", "REC-SUB-013-0",
     ):
         service.decide(record_id, "approve", "Eval Approver", "eval: matched")
 
+    # The credit is applied before any run is assembled: a
+    # controller nets CN-1001 against INV-1001 in code, and
+    # from here on every figure the packet and the runs carry
+    # for that invoice is its open amount — 1200.00, with the
+    # credit listed and the 1400.00 face untouched.
+    service.apply_credit("REC-SUB-007-0", "Eval Controller")
+    credited_invoice = service.get_record("REC-SUB-001-0")
+    applied_credit = service.get_record("REC-SUB-007-0")
+    packet_line = next(
+        line for line in service.payment_packet().lines
+        if line.record_id == "REC-SUB-001-0"
+    )
+    application_nets = (
+        applied_credit.credit_state == "APPLIED"
+        and applied_credit.applied_invoice_record_id == "REC-SUB-001-0"
+        and credited_invoice.decision is not None
+        and float(credited_invoice.extraction.value("total")) == 1400.00
+        and packet_line.amount == 1200.00
+        and packet_line.gross_amount == 1400.00
+        and [c.credit_number for c in packet_line.credits_applied]
+        == ["CN-1001"]
+    )
+
     first = service.create_payment_run(
         "2026-10-16", record_ids=["REC-SUB-001-0", "REC-SUB-007-0"]
     )
     first_ties = (
-        [line.record_id for line in first.lines]
-        == ["REC-SUB-001-0", "REC-SUB-007-0"]
-        and first.totals_by_currency == {"USD": 1200.00}  # 1400.00 − 200.00 CN
+        [line.record_id for line in first.lines] == ["REC-SUB-001-0"]
+        and first.lines[0].amount == 1200.00  # the net open amount
+        and first.lines[0].gross_amount == 1400.00
+        and [c.credit_number for c in first.lines[0].credits_applied]
+        == ["CN-1001"]
+        and {r.record_id: r.code for r in first.refusals}.get(
+            "REC-SUB-007-0") == "CREDIT_NOTE"
+        and first.totals_by_currency == {"USD": 1200.00}
     )
     service.decide_payment_run(
         first.run_id, "return", "Eval Treasurer", "eval: rework the batch"
@@ -389,6 +431,105 @@ def evaluate(service: ApService) -> dict:
         "run_and_export_untouched": run_and_export_untouched,
     }
 
+    # -- credit application ------------------------------------
+    # The discipline around the application already made in
+    # the payment-run section: a full cover, and every named
+    # refusal. The follow-up run from that section still holds
+    # REC-SUB-013-0; return it first so the cover check can
+    # assemble on that invoice.
+    service.decide_payment_run(
+        follow_up.run_id, "return", "Eval Treasurer",
+        "eval: free the sweep member",
+    )
+
+    def apply_refusal(record_id: str) -> str:
+        try:
+            service.apply_credit(record_id, "Eval Controller")
+        except GateError as exc:
+            return str(exc)
+        return ""
+
+    # Full cover: CN-2003 (200.00) against INV-2003 (200.00).
+    service.decide("REC-SUB-019-0", "approve", "Eval Approver", "eval: matched")
+    service.decide("REC-SUB-024-0", "approve", "Eval Approver", "eval: matched")
+    service.apply_credit("REC-SUB-024-0", "Eval Controller")
+    cover_run = service.create_payment_run(
+        "2026-11-06", record_ids=["REC-SUB-019-0", "REC-SUB-013-0"]
+    )
+    cover_refusal = {
+        r.record_id: r for r in cover_run.refusals
+    }.get("REC-SUB-019-0")
+    full_cover_excludes = (
+        bool(service.get_record("REC-SUB-019-0").credits_applied)
+        and cover_refusal is not None
+        and cover_refusal.code == "FULLY_CREDITED"
+        and "CN-2003" in cover_refusal.reason
+        and [line.record_id for line in cover_run.lines]
+        == ["REC-SUB-013-0"]
+    )
+    service.decide_payment_run(
+        cover_run.run_id, "return", "Eval Treasurer", "eval: cover checked"
+    )
+
+    # Over-credit: CN-3001 is 650.00 against INV-3001's 600.00.
+    # (The CN-2002/INV-2002 pair plants the same case, but the
+    # confirmation scenario above has already paid-proposed
+    # INV-2002 — its refusal there would be the late one.)
+    service.decide("REC-SUB-030-0", "approve", "Eval Approver", "eval: matched")
+    service.decide("REC-SUB-031-0", "approve", "Eval Approver", "eval: matched")
+    over = apply_refusal("REC-SUB-031-0")
+    over_credit_refused = (
+        over.startswith("OVER_CREDIT")
+        and "650.00" in over and "600.00" in over
+        and service.get_record("REC-SUB-031-0").credit_state == "UNAPPLIED"
+        and service.get_record("REC-SUB-030-0").credits_applied == []
+    )
+
+    # No reference, an unknown invoice, the fraud-held target.
+    service.decide("REC-SUB-026-0", "approve", "Eval Approver", "eval: matched")
+    no_reference = apply_refusal("REC-SUB-026-0")
+    service.decide("REC-SUB-027-0", "approve", "Eval Approver", "eval: matched")
+    unknown_invoice = apply_refusal("REC-SUB-027-0")
+    service.decide("REC-SUB-028-0", "approve", "Eval Approver", "eval: matched")
+    fraud_target = apply_refusal("REC-SUB-028-0")
+    references_held = (
+        no_reference.startswith("NO_INVOICE_REFERENCE")
+        and unknown_invoice.startswith("INVOICE_NOT_ON_FILE")
+        and "INV-9999" in unknown_invoice
+        and fraud_target.startswith("TARGET_FRAUD_HOLD")
+    )
+
+    # Late: CN-1003 names INV-1001, released in the batch above.
+    service.decide("REC-SUB-029-0", "approve", "Eval Approver", "eval: matched")
+    late = apply_refusal("REC-SUB-029-0")
+    late_refused = (
+        late.startswith("TARGET_PAID_PROPOSED")
+        and batch.run_id in late
+        and service.get_record("REC-SUB-029-0").credit_state == "UNAPPLIED"
+    )
+
+    # The released batch's export instructs the net figure and
+    # carries no negative credit line of its own.
+    batch_export = service.payment_run_export(batch.run_id).decode("utf-8")
+    net_row = next(
+        row for row in batch_export.splitlines() if "REC-SUB-001-0" in row
+    )
+    export_net = (
+        net_row.rstrip().endswith(",1200.00")
+        and "REC-SUB-007-0" not in batch_export
+    )
+    credit_results = {
+        "application_nets_invoice": application_nets,
+        "full_cover_excludes": full_cover_excludes,
+        "over_credit_refused": over_credit_refused,
+        "references_held": references_held,
+        "late_refused": late_refused,
+        "refusals_named": (
+            over_credit_refused and references_held and late_refused
+        ),
+        "export_net": export_net,
+    }
+
     total_cases = len(cases)
     passed = sum(1 for c in cases if c["passed"])
     results = {
@@ -409,6 +550,7 @@ def evaluate(service: ApService) -> dict:
         "statement_reconciliation": statement_results,
         "payment_runs": payment_run_results,
         "remittance_confirmation": confirmation_results,
+        "credit_notes": credit_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
@@ -437,6 +579,12 @@ def evaluate(service: ApService) -> dict:
         "confirmation_unmatched_held": confirmation_results["unmatched_held"],
         "confirmation_leaves_run_and_export_untouched":
             confirmation_results["run_and_export_untouched"],
+        "credit_application_nets_the_invoice":
+            credit_results["application_nets_invoice"],
+        "credit_full_cover_excludes_from_run":
+            credit_results["full_cover_excludes"],
+        "credit_refusals_named": credit_results["refusals_named"],
+        "credit_export_carries_net_amounts": credit_results["export_net"],
     }
     results["gate_passed"] = all(results["gates"].values())
     return results

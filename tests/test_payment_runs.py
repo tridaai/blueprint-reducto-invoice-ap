@@ -27,29 +27,40 @@ def approve(service: ApService, *record_ids: str) -> None:
         service.decide(record_id, "approve", APPROVER, "matched")
 
 
-def test_run_assembles_approved_records_and_nets_the_credit_note(seeded):
+def test_run_assembles_approved_records_at_their_open_amounts(seeded):
     approve(seeded, "REC-SUB-001-0", "REC-SUB-007-0", "REC-SUB-017-0")
+    seeded.apply_credit("REC-SUB-007-0", "Marta Chen (controller)")
     run = seeded.create_payment_run(
         "2026-10-16",
         record_ids=["REC-SUB-001-0", "REC-SUB-007-0", "REC-SUB-017-0"],
     )
     assert run.status == "AWAITING_TREASURER"
     assert run.value_date == "2026-10-16"
+    # The credit note is not a member: its reduction already
+    # stands in the invoice's member line — 1400.00 face, 200.00
+    # of CN-1001 applied, 1200.00 to pay — beside the untouched
+    # 900.00 invoice.
     assert [line.record_id for line in run.lines] == [
-        "REC-SUB-001-0", "REC-SUB-007-0", "REC-SUB-017-0",
+        "REC-SUB-001-0", "REC-SUB-017-0",
     ]
-    # The packet's netting, reused: 1400.00 invoice − 200.00
-    # credit note + 900.00 invoice.
-    assert run.lines[1].amount == -200.00
+    member_line = run.lines[0]
+    assert member_line.amount == 1200.00
+    assert member_line.gross_amount == 1400.00
+    assert [c.credit_number for c in member_line.credits_applied] == ["CN-1001"]
     assert run.totals_by_currency == {"USD": 2100.00}
     assert run.totals_by_currency["USD"] == round(
         sum(line.amount for line in run.lines), 2
     )
-    assert run.refusals == []
+    (refusal,) = run.refusals
+    assert refusal.record_id == "REC-SUB-007-0"
+    assert refusal.code == "CREDIT_NOTE"
+    assert "REC-SUB-001-0" in refusal.reason  # where the credit landed
     member = seeded.get_record("REC-SUB-001-0")
     assert member.payment_state == "IN_RUN"
     assert member.payment_run_id == run.run_id
     assert member.status == "APPROVED"  # the approval itself is untouched
+    # The credit note itself is held by nothing.
+    assert seeded.get_record("REC-SUB-007-0").payment_state is None
 
 
 def test_auto_assembly_sweeps_the_approved_universe(seeded):
@@ -111,21 +122,21 @@ def test_second_run_refuses_a_held_member_with_the_holding_run_named(seeded):
 
 
 def test_return_frees_every_member_to_join_a_later_run(seeded):
-    approve(seeded, "REC-SUB-001-0", "REC-SUB-007-0")
+    approve(seeded, "REC-SUB-001-0", "REC-SUB-017-0")
     run = seeded.create_payment_run(
-        "2026-10-16", record_ids=["REC-SUB-001-0", "REC-SUB-007-0"]
+        "2026-10-16", record_ids=["REC-SUB-001-0", "REC-SUB-017-0"]
     )
     returned = seeded.decide_payment_run(
-        run.run_id, "return", TREASURER, "CN-1001 needs its PO checked first"
+        run.run_id, "return", TREASURER, "wrong value date — rework the batch"
     )
     assert returned.status == "RETURNED"
-    for record_id in ("REC-SUB-001-0", "REC-SUB-007-0"):
+    for record_id in ("REC-SUB-001-0", "REC-SUB-017-0"):
         record = seeded.get_record(record_id)
         assert record.payment_state is None
         assert record.payment_run_id is None
         assert record.status == "APPROVED"
     later = seeded.create_payment_run(
-        "2026-10-23", record_ids=["REC-SUB-001-0", "REC-SUB-007-0"]
+        "2026-10-23", record_ids=["REC-SUB-001-0", "REC-SUB-017-0"]
     )
     assert len(later.lines) == 2 and later.refusals == []
 
@@ -171,11 +182,11 @@ def test_export_carries_the_supplier_masters_bank_details_only(seeded):
     account on the supplier master — and the fraud record,
     whose invoice named a different account, is not in the
     file at all, under either account number."""
-    approve(seeded, "REC-SUB-001-0", "REC-SUB-007-0", "REC-SUB-017-0")
+    approve(seeded, "REC-SUB-001-0", "REC-SUB-017-0")
     run = seeded.create_payment_run(
         "2026-10-16",
         record_ids=[
-            "REC-SUB-001-0", "REC-SUB-007-0", "REC-SUB-017-0", "REC-SUB-008-0",
+            "REC-SUB-001-0", "REC-SUB-017-0", "REC-SUB-008-0",
         ],
     )
     seeded.decide_payment_run(run.run_id, "release", TREASURER, "batch reviewed")
@@ -275,6 +286,12 @@ def test_payment_run_over_http(client):
     assert client.post("/demo/seed").status_code == 201
     _approve_over_http(client, "REC-SUB-001-0")
     _approve_over_http(client, "REC-SUB-007-0")
+    applied = client.post(
+        "/credits/REC-SUB-007-0/apply",
+        json={"actor": "Marta Chen (controller)"},
+    )
+    assert applied.status_code == 200
+    assert applied.json()["credit_state"] == "APPLIED"
 
     created = client.post(
         "/payments/runs",
@@ -286,8 +303,12 @@ def test_payment_run_over_http(client):
     assert created.status_code == 201
     run = created.json()
     assert run["status"] == "AWAITING_TREASURER"
+    # One member, at its net open amount: 1400.00 − CN-1001's 200.00.
     assert run["totals_by_currency"] == {"USD": 1200.00}
-    assert run["refusals"][0]["code"] == "FRAUD_HOLD"
+    assert run["lines"][0]["amount"] == 1200.00
+    assert run["lines"][0]["credits_applied"][0]["credit_number"] == "CN-1001"
+    refusals = {r["record_id"]: r["code"] for r in run["refusals"]}
+    assert refusals == {"REC-SUB-007-0": "CREDIT_NOTE", "REC-SUB-008-0": "FRAUD_HOLD"}
 
     listed = client.get("/payments/runs")
     assert [r["run_id"] for r in listed.json()] == [run["run_id"]]

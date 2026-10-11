@@ -1,7 +1,7 @@
 {
   "backend": "offline",
-  "cases": 24,
-  "passed": 24,
+  "cases": 32,
+  "passed": 32,
   "match_decision_accuracy": 1.0,
   "extraction_accuracy_by_field": {
     "invoice_number": 1.0,
@@ -48,6 +48,15 @@
     "unmatched_held": true,
     "run_and_export_untouched": true
   },
+  "credit_notes": {
+    "application_nets_invoice": true,
+    "full_cover_excludes": true,
+    "over_credit_refused": true,
+    "references_held": true,
+    "late_refused": true,
+    "refusals_named": true,
+    "export_net": true
+  },
   "failures": [],
   "gates": {
     "match_decision_accuracy == 1.0": true,
@@ -66,7 +75,11 @@
     "confirmation_classes_exact": true,
     "confirmation_summary_ties": true,
     "confirmation_unmatched_held": true,
-    "confirmation_leaves_run_and_export_untouched": true
+    "confirmation_leaves_run_and_export_untouched": true,
+    "credit_application_nets_the_invoice": true,
+    "credit_full_cover_excludes_from_run": true,
+    "credit_refusals_named": true,
+    "credit_export_carries_net_amounts": true
   },
   "gate_passed": true
 }

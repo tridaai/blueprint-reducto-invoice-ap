@@ -23,7 +23,7 @@ def test_eval_gates_pass_on_the_golden_world():
     assert results["citation_presence"] == 1.0
     assert results["extraction_accuracy_by_field"]["invoice_number"] == 1.0
     assert results["extraction_accuracy_by_field"]["total"] == 1.0
-    assert results["cases"] == 24  # 23 submissions, one bundle of two
+    assert results["cases"] == 32  # 31 submissions, one bundle of two
     recon = results["statement_reconciliation"]
     assert recon["breaks_exact"]
     assert recon["clean_reconciles_fully"]
@@ -44,3 +44,11 @@ def test_eval_gates_pass_on_the_golden_world():
     assert confirmation["summary_ties"]
     assert confirmation["unmatched_held"]
     assert confirmation["run_and_export_untouched"]
+    credits = results["credit_notes"]
+    assert credits["application_nets_invoice"]
+    assert credits["full_cover_excludes"]
+    assert credits["over_credit_refused"]
+    assert credits["references_held"]
+    assert credits["late_refused"]
+    assert credits["refusals_named"]
+    assert credits["export_net"]
