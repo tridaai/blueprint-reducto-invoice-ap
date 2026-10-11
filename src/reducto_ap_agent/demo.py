@@ -23,14 +23,20 @@ contained, all itemised for a controller — and finally the
 supplier ledger: the whole relationship with Harborlight on
 one page, its totals tied to the position, and one stray
 document that names a supplier AP has never seen spelled that
-way, listed as unmatched rather than attached by resemblance.
+way, listed as unmatched rather than attached by resemblance
+— and finally the paid-duplicate watch: INV-1001 sent a second
+time after its run released, held on the paid evidence with
+the gate refusing to decide it, confirmed a duplicate by a
+controller; and the supplier's net re-bill, held on the NET
+basis and released as not a duplicate — back to the exception
+its own match earned, in the open.
 """
 
 from __future__ import annotations
 
 from langgraph.checkpoint.memory import MemorySaver
 
-from .datasets import _doc, build_world, remittance_advice_doc
+from .datasets import _doc, _inv_fields, build_world, remittance_advice_doc
 from .errors import GateError
 from .graph import ApPipeline
 from .object_store import InMemoryObjectStore
@@ -330,6 +336,62 @@ def run_demo() -> ApService:
     for doc in index.unmatched:
         print(f"  UNMATCHED {doc.record_id} — wrote its supplier as "
               f"{doc.name_as_written!r}; attached to no supplier's ledger")
+    print("\nThe paid-duplicate watch — weeks later, the same bill "
+          "arrives again:")
+    sub001_text = next(
+        s.text for s in world.submissions if s.submission_id == "SUB-001"
+    )
+    (resend,) = service.submit(
+        "SUB-DEMO-RESEND", "sub-demo-resend.pdf",
+        sub001_text.encode("utf-8"), "text/plain",
+    )
+    hold = resend.duplicate_hold
+    print(f"  {resend.record_id} invoice INV-1001 again — {resend.status}")
+    print(f"  evidence: already released for payment as "
+          f"{hold.original_record_id} in run {hold.payment_run_id} for "
+          f"{hold.currency} {hold.amount_paid:.2f} (face "
+          f"{hold.paid_face_amount:.2f}); this arrival states "
+          f"{hold.arrived_amount:.2f} — the {hold.amount_basis} figure")
+    try:
+        service.decide(resend.record_id, "approve", APPROVER, "demo: pay it")
+        print("  gate decided it (unexpected)")
+    except GateError as exc:
+        print(f"  GATE REFUSED: {exc}")
+    confirmed = service.resolve_duplicate_hold(
+        resend.record_id, "CONFIRMED_DUPLICATE", "Marta Chen (controller)",
+        "demo: the supplier confirmed the original was paid — this is "
+        "the same bill, sent twice",
+    )
+    print(f"  → {confirmed.status} — the hold becomes a permanent "
+          "refusal on the record; the original payment is untouched")
+    s02 = world.supplier("SUP-02")
+    net_text = _doc("INVOICE", 1, _inv_fields(
+        s02, "INV-1001", "PO-6001", 1200.00,
+    ), [LineItem(sku="SKU-A1", description="Industrial valves",
+                 quantity=10, unit_price=120.00, amount=1200.00)])
+    (net_resend,) = service.submit(
+        "SUB-DEMO-RESEND-NET", "sub-demo-resend-net.pdf",
+        net_text.encode("utf-8"), "text/plain",
+    )
+    net_hold = net_resend.duplicate_hold
+    print(f"\n  {net_resend.record_id} — the supplier re-bills at "
+          f"{net_hold.arrived_amount:.2f}, the net figure the run "
+          f"instructed after CN-1001: {net_resend.status} "
+          f"({net_hold.amount_basis} basis)")
+    released = service.resolve_duplicate_hold(
+        net_resend.record_id, "RELEASED_NOT_DUPLICATE",
+        "Marta Chen (controller)",
+        "demo: a corrected re-bill for the uncredited goods, not the "
+        "paid bill again",
+    )
+    print(f"  → released as not a duplicate → {released.status} "
+          f"{released.match.exception_codes} — the release settles the "
+          "duplicate question only; the re-bill still disagrees with "
+          "the PO total by exactly the credit, and that break is the "
+          "AP team's to work, as an exception, in the open")
+    watch = service.list_duplicate_watch("2026-11-15")
+    print(f"  watch list now: {len(watch)} standing hold(s)")
+
     return service
 
 

@@ -49,6 +49,7 @@
   .st-AWAITING_APPROVER { color: var(--indigo); }
   .st-EXCEPTION, .st-TOTAL_MISMATCH { color: var(--warn); }
   .st-FRAUD_REVIEW, .st-REFUSED, .st-REJECTED { color: var(--bad); }
+  .st-PAID_DUPLICATE_HOLD { color: var(--bad); }
   .st-ACCEPTED { color: var(--ok); }
   .st-AWAITING_CONTROLLER { color: var(--indigo); }
   .st-FLAGGED_BACK { color: var(--bad); }
@@ -103,7 +104,7 @@
       <select id="status-filter">
         <option value="">All statuses</option>
         <option>AWAITING_APPROVER</option><option>APPROVED</option><option>REJECTED</option>
-        <option>EXCEPTION</option><option>FRAUD_REVIEW</option><option>REFUSED</option><option>RECEIVED</option>
+        <option>EXCEPTION</option><option>FRAUD_REVIEW</option><option>PAID_DUPLICATE_HOLD</option><option>REFUSED</option><option>RECEIVED</option>
       </select>
     </div>
     <table>
@@ -158,6 +159,13 @@
       <span class="note" id="position-tie"></span>
     </div>
     <div id="position" class="note" style="margin-top:8px;">No position loaded yet.</div>
+  </section>
+</div>
+<div style="padding: 0 28px 8px;">
+  <section>
+    <h2>Paid-duplicate watch</h2>
+    <p class="note" style="margin-top:0;">The duplicate that arrives second: an invoice that answers to one already released for payment — same supplier, same number, at the paid face or the net figure the run instructed — is held at intake on the paid evidence below. The gate cannot decide a held record; a named controller resolves the hold, with a reason, one of two ways: confirm it (the record is refused permanently) or release it as not a duplicate (it returns to the state its own match earned). Nothing here touches the original payment — there is no clawback, only a stop on the second one.</p>
+    <div id="watch-list" class="note">No held duplicates — nothing on file answers to a payment already released.</div>
   </section>
 </div>
 <div style="padding: 0 28px 8px;">
@@ -322,6 +330,15 @@ async function showRecord(id) {
     html += `<p class="note" style="margin-top:6px;">Payment: ${r.payment_state === "PAID_PROPOSED" ? "paid-proposed in released run" : "held in open run"} ${r.payment_run_id}</p>`;
   if (r.payment_confirmation)
     html += `<p class="note" style="margin-top:6px;">Bank confirmation: <strong>${r.payment_confirmation}</strong> — per ${r.payment_confirmation_id} (an overlay on the proposal; the approval above is untouched)</p>`;
+  if (r.duplicate_hold) {
+    const h = r.duplicate_hold;
+    html += `<h2 style="margin-top:14px;">Paid-duplicate watch</h2>
+      <p class="flag">⚠ Invoice ${h.invoice_number} was already released for payment as ${h.original_record_id} in run ${h.payment_run_id} (released ${h.released_at} by ${h.released_by}) for <strong>${h.currency} ${money(h.amount_paid)}</strong>; this arrival states ${money(h.arrived_amount)} — the ${h.amount_basis} figure.</p>`;
+    if (h.resolution)
+      html += `<p class="note">Resolution: ${h.resolution.action} by ${h.resolution.actor} — ${h.resolution.reason}</p>`;
+    else
+      html += `<p class="note">Unresolved — the gate cannot decide this record. Resolve it in the Paid-duplicate watch section below.</p>`;
+  }
   if (r.extraction && r.extraction.remittance_lines && r.extraction.remittance_lines.length)
     html += `<h2 style="margin-top:14px;">Remittance paid lines</h2><table><thead><tr><th>Invoice</th><th>Paid</th><th>Currency</th><th>Value date</th><th>Bank ref</th></tr></thead><tbody>`
       + r.extraction.remittance_lines.map(l => `<tr><td>${l.invoice_number}</td><td>${money(l.amount_paid)}</td><td>${l.currency}</td><td>${l.value_date}</td><td>${l.bank_reference}</td></tr>`).join("")
@@ -509,6 +526,43 @@ async function loadConfirmations() {
   });
 }
 
+async function loadWatch() {
+  const asOf = $("position-as-of").value || "2026-11-15";
+  const holds = await api("/duplicates/watch?as_of=" + asOf);
+  const host = $("watch-list");
+  if (!holds.length) {
+    host.innerHTML = "No held duplicates — nothing on file answers to a payment already released.";
+    return;
+  }
+  host.classList.remove("note");
+  host.innerHTML = holds.map(r => {
+    const h = r.duplicate_hold;
+    const age = r.hold_age_days === null || r.hold_age_days === undefined ? "" : ` · held ${r.hold_age_days}d (as of ${asOf})`;
+    return `<div style="margin-bottom:12px;"><strong>${r.record_id}</strong> · ${r.supplier_name || "—"} · invoice ${h.invoice_number} · arrived <strong>${h.currency} ${money(h.arrived_amount)}</strong> — the ${h.amount_basis} figure
+      <p class="flag" style="margin:4px 0;">⚠ Already released for payment as ${h.original_record_id} in run ${h.payment_run_id} (released ${h.released_at} by ${h.released_by}) for <strong>${h.currency} ${money(h.amount_paid)}</strong>${h.paid_face_amount !== h.amount_paid ? ` — face ${money(h.paid_face_amount)}, paid net of credits` : ""}${age}</p>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <input id="dup-actor-${r.record_id}" placeholder="Controller name (required)" size="24">
+        <input id="dup-reason-${r.record_id}" placeholder="Reason (required)" size="34">
+        <button data-confirm-dup="${r.record_id}">Confirm duplicate</button>
+        <button class="secondary" data-release-dup="${r.record_id}">Release — not a duplicate</button>
+      </div>
+      <p class="note" id="dup-error-${r.record_id}"></p></div>`;
+  }).join("");
+  document.querySelectorAll("button[data-confirm-dup], button[data-release-dup]").forEach(b => {
+    const id = b.dataset.confirmDup || b.dataset.releaseDup;
+    const action = b.dataset.confirmDup ? "CONFIRMED_DUPLICATE" : "RELEASED_NOT_DUPLICATE";
+    b.addEventListener("click", async () => {
+      try {
+        await api(`/records/${id}/duplicate-resolution`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({action, actor: $("dup-actor-" + id).value, reason: $("dup-reason-" + id).value}),
+        });
+        await loadWatch(); await loadRecords(); await loadLedgers();
+      } catch (e) { $("dup-error-" + id).textContent = e.message; }
+    });
+  });
+}
+
 async function loadLedgers() {
   const asOf = $("position-as-of").value || "2026-11-15";
   const index = await api("/suppliers/index?as_of=" + asOf);
@@ -519,7 +573,7 @@ async function loadLedgers() {
     const counts = Object.entries(s.document_counts).map(([k, n]) => `${k} ${n}`).join(" · ") || "no documents yet";
     const open = Object.entries(s.open_totals_by_currency).map(([c, t]) => `${c} ${money(t)}`).join(" · ");
     return `<div style="margin-bottom:6px;"><button class="secondary" data-ledger="${s.supplier_id}">${s.supplier_name}</button>
-      <span class="note">${counts}${open ? " · open " + open : ""}${s.open_break_count ? " · " + s.open_break_count + " open statement break(s)" : ""}${s.bank_warning ? ' · <span class="flag">⚠ bank-change warning</span>' : ""}</span></div>`;
+      <span class="note">${counts}${open ? " · open " + open : ""}${s.open_break_count ? " · " + s.open_break_count + " open statement break(s)" : ""}${s.bank_warning ? ' · <span class="flag">⚠ bank-change warning</span>' : ""}${s.duplicate_hold_count ? ' · <span class="flag">⚠ ' + s.duplicate_hold_count + " paid-duplicate hold(s)</span>" : ""}</span></div>`;
   }).join("");
   if (index.unmatched_count)
     html += `<p class="flag" style="margin-top:8px;">Unmatched — joined to no supplier (${index.unmatched_count}):</p>`
@@ -543,6 +597,13 @@ async function showLedger(supplierId) {
       + l.invoices.map(i => `<tr><td>${i.invoice_number}</td><td class="status st-${i.status}">${i.status}</td><td>${money(i.face)}</td><td>${i.credits_applied.length ? i.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", ") : "—"}</td><td><strong>${money(i.open)}</strong></td><td>${i.match_status || "—"}${i.exception_codes.length ? " (" + i.exception_codes.join(", ") + ")" : ""}</td><td>${i.payment_state ? i.payment_state + " · " + (i.payment_run_id || "") : "—"}</td><td>${i.payment_confirmation || "—"}</td><td>${i.bucket || (i.fully_credited ? "fully credited" : "—")}</td></tr>`).join("")
       + `</tbody></table>`;
   } else html += `<p class="note">No invoices on file for this supplier.</p>`;
+  const heldInvoices = l.invoices.filter(i => i.duplicate_hold);
+  if (heldInvoices.length)
+    html += `<h2 style="margin-top:14px;">Paid-duplicate holds</h2>` + heldInvoices.map(i => {
+      const h = i.duplicate_hold;
+      const ruling = h.resolution ? ` — resolved ${h.resolution.action} by ${h.resolution.actor}: ${h.resolution.reason}` : " — unresolved; the gate cannot decide it";
+      return `<p class="flag">⚠ ${i.invoice_number} (${i.record_id}): already released for payment as ${h.original_record_id} in run ${h.payment_run_id} for ${h.currency} ${money(h.amount_paid)}; this arrival states ${money(h.arrived_amount)} — the ${h.amount_basis} figure${ruling}</p>`;
+    }).join("");
   if (l.credits.length)
     html += `<h2 style="margin-top:14px;">Credit notes</h2>` + l.credits.map(c =>
       `<div style="margin-bottom:6px;">${c.credit_number} · <strong>${c.currency} ${money(c.amount)}</strong> · ${c.credit_state || "—"}${c.credit_state === "APPLIED" ? " — applied against " + c.applied_invoice_record_id : " — " + (c.unapplied_reason || "")}</div>`).join("");
@@ -568,11 +629,11 @@ $("create-run").addEventListener("click", async () => {
   } catch (e) { $("run-error").textContent = e.message; }
 });
 
-$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadLedgers(); });
-$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadLedgers(); });
-$("load-position").addEventListener("click", async () => { await loadPosition(); await loadLedgers(); });
+$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadWatch(); await loadLedgers(); });
+$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadWatch(); await loadLedgers(); });
+$("load-position").addEventListener("click", async () => { await loadPosition(); await loadWatch(); await loadLedgers(); });
 $("status-filter").addEventListener("change", loadRecords);
-readiness(); loadRecords(); loadRecons(); loadRuns(); loadConfirmations(); loadPosition(); loadLedgers();
+readiness(); loadRecords(); loadRecons(); loadRuns(); loadConfirmations(); loadPosition(); loadWatch(); loadLedgers();
 </script>
 </body>
 </html>
