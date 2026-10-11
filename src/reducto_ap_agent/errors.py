@@ -62,6 +62,16 @@ class ReconciliationError(ApError):
     status_code = 422
 
 
+class ConfirmationError(ApError):
+    """A remittance confirmation was asked of something that
+    cannot be confirmed — a record that is not a remittance
+    advice, an advice whose lines were never captured. (An
+    advice that names no run on file is NOT an error: it is
+    held UNMATCHED on its confirmation record, reason named.)"""
+
+    status_code = 422
+
+
 class PaymentRunError(ApError):
     """A payment run could not be assembled or released as asked
     — no eligible records, a member whose supplier is not on

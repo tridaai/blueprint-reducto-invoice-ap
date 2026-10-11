@@ -113,12 +113,34 @@ class ApPipeline:
         record.doc_class = classification.doc_class  # type: ignore[assignment]
 
         if record.doc_class in ATTACHMENT_CLASSES:
+            if record.doc_class == "remittance_advice":
+                # An attachment for the payment path — but the
+                # advice's paid lines are the input to remittance
+                # confirmation, the bank's answer to a released
+                # payment run, reconciled on a separate path off
+                # this same intake. Capture them on the record
+                # before it is filed, so confirmation reads
+                # records, not raw documents.
+                extraction = self.documents.extract(sub)
+                extraction.doc_class = record.doc_class
+                record.extraction = extraction
+                run_ref = extraction.value("payment_run_id")
+                record.audit.append({
+                    "event": "remittance_captured", "at": _now(),
+                    "detail": (
+                        f"{len(extraction.remittance_lines)} paid lines captured "
+                        "for remittance confirmation; "
+                        + (f"the advice names payment run {run_ref}"
+                           if run_ref else "the advice names no payment run")
+                    ),
+                })
             record.status = "RECEIVED"
             record.audit.append({
                 "event": "attachment_stored",
                 "at": _now(),
                 "detail": f"classified {record.doc_class}; stored with the submission, not processed for payment",
             })
+            record.updated_at = _now()
             return self.store.save(record)
 
         refusal = guardrails.payable_refusal(record.doc_class)

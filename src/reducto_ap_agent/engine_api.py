@@ -96,4 +96,6 @@ def extract(request: InputRequest) -> dict:
     doc = _adapter.extract(_doc_for(request.input))
     result: dict = {name: field.value for name, field in doc.fields.items()}
     result["lines"] = [line.model_dump() for line in doc.lines]
+    result["statement_lines"] = [line.model_dump() for line in doc.statement_lines]
+    result["remittance_lines"] = [line.model_dump() for line in doc.remittance_lines]
     return {"result": result, "job_id": "offline-stand-in"}

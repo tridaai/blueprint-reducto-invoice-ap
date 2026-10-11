@@ -31,17 +31,25 @@ import httpx
 
 from .errors import DocumentBackendUnavailable, DocumentNotConfigured
 from .ports import Classification, SubDocument, UploadedDocument
-from .schemas import Citation, ExtractedDocument, ExtractedField, LineItem, StatementLine
+from .schemas import (
+    Citation,
+    ExtractedDocument,
+    ExtractedField,
+    LineItem,
+    RemittanceLine,
+    StatementLine,
+)
 
 log = logging.getLogger(__name__)
 
 # The extraction schema sent with every extract call. Field
 # names are the pipeline's vocabulary (schemas.py); the engine
 # is asked for exactly these, nothing more. One schema covers
-# both payable documents (fields + lines) and statements (the
-# statement fields + open-item lines) — the classifier has
-# already said which shape the document is, and the fields that
-# don't apply simply come back empty.
+# payable documents (fields + lines), statements (the statement
+# fields + open-item lines), and remittance advices (the run
+# reference + paid lines) — the classifier has already said
+# which shape the document is, and the fields that don't apply
+# simply come back empty.
 INVOICE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -57,6 +65,8 @@ INVOICE_SCHEMA: dict[str, Any] = {
         "bank_account": {"type": "string"},
         "statement_date": {"type": "string"},
         "period": {"type": "string"},
+        "payment_run_id": {"type": "string"},
+        "advice_date": {"type": "string"},
         "lines": {
             "type": "array",
             "items": {
@@ -79,6 +89,20 @@ INVOICE_SCHEMA: dict[str, Any] = {
                     "invoice_date": {"type": "string"},
                     "amount": {"type": "number"},
                     "currency": {"type": "string"},
+                },
+            },
+        },
+        "remittance_lines": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "invoice_number": {"type": "string"},
+                    "amount_paid": {"type": "number"},
+                    "currency": {"type": "string"},
+                    "value_date": {"type": "string"},
+                    "bank_reference": {"type": "string"},
+                    "payment_run_id": {"type": "string"},
                 },
             },
         },
@@ -250,6 +274,7 @@ class ReductoDocumentAdapter:
         fields: dict[str, ExtractedField] = {}
         lines: list[LineItem] = []
         statement_lines: list[StatementLine] = []
+        remittance_lines: list[RemittanceLine] = []
         for key, raw in result.items():
             if key == "lines" and isinstance(raw, list):
                 for row in raw:
@@ -276,6 +301,20 @@ class ReductoDocumentAdapter:
                             )
                         )
                 continue
+            if key == "remittance_lines" and isinstance(raw, list):
+                for row in raw:
+                    if isinstance(row, dict):
+                        remittance_lines.append(
+                            RemittanceLine(
+                                invoice_number=str(row.get("invoice_number") or ""),
+                                amount_paid=float(row.get("amount_paid") or 0),
+                                currency=str(row.get("currency") or "USD"),
+                                value_date=str(row.get("value_date") or ""),
+                                bank_reference=str(row.get("bank_reference") or ""),
+                                payment_run_id=str(row.get("payment_run_id") or ""),
+                            )
+                        )
+                continue
             value, citation, confidence = raw, None, None
             if isinstance(raw, dict) and "value" in raw:
                 value = raw.get("value")
@@ -289,5 +328,6 @@ class ReductoDocumentAdapter:
             fields=fields,
             lines=lines,
             statement_lines=statement_lines,
+            remittance_lines=remittance_lines,
             currency=str(fields["currency"].value) if "currency" in fields and fields["currency"].value else "USD",
         )

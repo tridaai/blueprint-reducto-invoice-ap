@@ -23,7 +23,14 @@ import re
 
 from .errors import DocumentBackendUnavailable
 from .ports import Classification, SubDocument, UploadedDocument
-from .schemas import Citation, ExtractedDocument, ExtractedField, LineItem, StatementLine
+from .schemas import (
+    Citation,
+    ExtractedDocument,
+    ExtractedField,
+    LineItem,
+    RemittanceLine,
+    StatementLine,
+)
 
 _SECTION_RE = re.compile(r"\[DOCUMENT:\s*([A-Z ]+)\]\s*$", re.MULTILINE)
 _PAGE_RE = re.compile(r"^=== PAGE (\d+) ===\s*$", re.MULTILINE)
@@ -53,6 +60,8 @@ _FIELD_BY_LABEL = {
     "Total": "total",
     "Statement Date": "statement_date",
     "Period": "period",
+    "Payment Run": "payment_run_id",
+    "Advice Date": "advice_date",
 }
 
 _NUMERIC_FIELDS = {"subtotal", "tax", "total"}
@@ -151,6 +160,7 @@ class OfflineDocumentAdapter:
         fields: dict[str, ExtractedField] = {}
         lines: list[LineItem] = []
         statement_lines: list[StatementLine] = []
+        remittance_lines: list[RemittanceLine] = []
         page_lines: dict[int, int] = {}
         current_page = section.page_start
         for raw_line in section.text.splitlines():
@@ -168,6 +178,24 @@ class OfflineDocumentAdapter:
             stripped = raw_line.strip()
             if "|" in stripped:
                 parts = [p.strip() for p in stripped.split("|")]
+                if len(parts) == 5 and section.marker == "REMITTANCE ADVICE":
+                    # Remittance paid row: number | amount paid |
+                    # currency | value date | bank reference. The
+                    # header row lands here too and fails the amount
+                    # parse, which is what skips it.
+                    try:
+                        remittance_lines.append(
+                            RemittanceLine(
+                                invoice_number=parts[0],
+                                amount_paid=float(parts[1].replace(",", "")),
+                                currency=parts[2] or "USD",
+                                value_date=parts[3],
+                                bank_reference=parts[4],
+                            )
+                        )
+                        continue
+                    except ValueError:
+                        pass
                 if len(parts) == 5:
                     try:
                         lines.append(
@@ -216,6 +244,7 @@ class OfflineDocumentAdapter:
             fields=fields,
             lines=lines,
             statement_lines=statement_lines,
+            remittance_lines=remittance_lines,
             currency=str(fields["currency"].value) if "currency" in fields else "USD",
             raw_text=section.text,
         )

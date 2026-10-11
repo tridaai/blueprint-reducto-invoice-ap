@@ -72,6 +72,23 @@ class StatementLine(BaseModel):
     currency: str = "USD"
 
 
+class RemittanceLine(BaseModel):
+    """One paid line on a remittance advice: the bank's report of
+    money that actually left, against one invoice of one payment
+    run. An advice line is the bank's claim about the past, not
+    an instruction — confirmation reconciliation is where it
+    gets checked against the run that proposed the payment."""
+
+    invoice_number: str
+    amount_paid: float = 0.0
+    currency: str = "USD"
+    value_date: str = ""
+    bank_reference: str = ""
+    # The payment run the line names, when the advice carries
+    # the reference per line rather than in its header (or both).
+    payment_run_id: str = ""
+
+
 class ExtractedDocument(BaseModel):
     """The extraction of one (sub-)document, as the port returns it."""
 
@@ -82,6 +99,9 @@ class ExtractedDocument(BaseModel):
     # lines, in the order the supplier listed them (order matters —
     # a repeated number later in the list is the duplicate break).
     statement_lines: list[StatementLine] = Field(default_factory=list)
+    # Populated when the document is a remittance advice: the
+    # paid lines the bank reports, in the order it listed them.
+    remittance_lines: list[RemittanceLine] = Field(default_factory=list)
     currency: str = "USD"
     raw_text: str = ""  # the text layer, where the engine exposes one
 
@@ -151,6 +171,17 @@ class GateDecision(BaseModel):
 # other.
 PaymentState = Literal["IN_RUN", "PAID_PROPOSED"]
 
+# A member record's remittance-confirmation state: what the
+# bank's advice said about this member when its run was last
+# reconciled against an advice. An overlay beside
+# ``payment_state``, never a replacement for it — PAID_PROPOSED
+# is what the run proposed; this is what the bank answered.
+# Written by the confirmation path only, and only ever about a
+# released run's members.
+PaymentConfirmationState = Literal[
+    "CONFIRMED", "SHORT_PAID", "OVER_PAID", "MISSING",
+]
+
 
 class DocumentRecord(BaseModel):
     """One processed (sub-)document and everything decided about it."""
@@ -170,6 +201,8 @@ class DocumentRecord(BaseModel):
     decision: GateDecision | None = None
     payment_run_id: str | None = None
     payment_state: PaymentState | None = None
+    payment_confirmation: PaymentConfirmationState | None = None
+    payment_confirmation_id: str | None = None
     audit: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
@@ -325,3 +358,92 @@ class PaymentRun(BaseModel):
         "A controlled proposal batch: released means handed to the "
         "customer's payment systems, not paid by this system."
     )
+
+
+ConfirmClass = Literal[
+    "paid_as_proposed",
+    "short_paid",
+    "over_paid",
+    "missing",
+    "unexpected_line",
+]
+
+ConfirmStatus = Literal[
+    "UNMATCHED", "AWAITING_CONTROLLER", "ACCEPTED", "FLAGGED_BACK",
+]
+
+
+class ConfirmationLine(BaseModel):
+    """One reconciled item of a remittance confirmation: a member
+    of the run, answered by the bank's advice — or an advice line
+    that names no member. Both figures ride along whenever both
+    exist; ``difference`` is paid − proposed, signed, and is
+    None whenever the two sides are not comparable (a side is
+    missing, or the money arrived in another currency)."""
+
+    invoice_number: str
+    classification: ConfirmClass
+    proposed_amount: float | None = None
+    paid_amount: float | None = None
+    currency: str = "USD"
+    member_record_id: str | None = None
+    value_date: str = ""
+    bank_reference: str = ""
+    difference: float | None = None
+    note: str = ""
+
+
+class ConfirmationTotals(BaseModel):
+    """The confirmation summary for one currency. The proposed
+    side partitions the run's members — confirmed + short +
+    over + missing must recompose the run's total for the
+    currency exactly, or the confirmation names the arithmetic
+    break. Unexpected lines are the bank's answers to questions
+    the run never asked; their money is reported here and is
+    never part of the tie."""
+
+    currency: str
+    run_total: float = 0.0
+    confirmed_proposed: float = 0.0
+    confirmed_paid: float = 0.0
+    short_proposed: float = 0.0
+    short_paid: float = 0.0
+    shortfall: float = 0.0
+    over_proposed: float = 0.0
+    over_paid: float = 0.0
+    excess: float = 0.0
+    missing_proposed: float = 0.0
+    unexpected_paid: float = 0.0
+
+
+class PaymentConfirmation(BaseModel):
+    """A stored reconciliation of one remittance advice against
+    the payment run it answers: every member classified, the
+    summary tied to the run's totals or the break named, and a
+    controller decision on top. Evidence over the run — a
+    confirmation never mutates the run, its export, the member
+    records' approvals, or any bank data; the only writes it
+    makes beyond its own record are the confirmation overlays
+    on the member records it classifies.
+
+    An advice that names no run on file (or no run at all) is
+    held ``UNMATCHED`` with the reason on the record: it is
+    never guessed onto a run, and there is nothing for a
+    controller to decide until it is tied to one."""
+
+    confirmation_id: str
+    advice_record_id: str
+    submission_id: str
+    run_id: str | None = None
+    status: ConfirmStatus = "AWAITING_CONTROLLER"
+    unmatched_reason: str = ""
+    lines: list[ConfirmationLine] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    totals: list[ConfirmationTotals] = Field(default_factory=list)
+    totals_tie: bool = False
+    flags: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+    decision: ControllerDecision | None = None
+    audit: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
