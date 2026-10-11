@@ -582,6 +582,206 @@ ConfirmStatus = Literal[
 ]
 
 
+class LedgerDocument(BaseModel):
+    """One document on a supplier's ledger (ledger.py): every
+    record the intake joined to this supplier, whatever its
+    class or state — the relationship's paper trail, before
+    any money reading is taken of it."""
+
+    record_id: str
+    submission_id: str
+    doc_class: DocClass = "unknown"
+    status: RecordStatus = "RECEIVED"
+    document_number: str = ""  # as extracted; credit notes carry theirs here too
+    total: float | None = None  # the extraction total, as read (credits negative)
+    refusal_reason: str | None = None
+    fraud_flags: list[str] = Field(default_factory=list)
+    created_at: str = ""
+
+
+class LedgerInvoice(BaseModel):
+    """One invoice on the ledger, with the whole of its money
+    story: the approved face, the credits applied against it
+    (the ledger entries themselves, so each figure traces to
+    its record), the open amount the packet and the runs read,
+    and where the money stands — its run membership, the
+    bank's confirmation answer, and its ageing bucket in the
+    position at the ledger's as-of."""
+
+    record_id: str
+    invoice_number: str = ""
+    status: RecordStatus = "RECEIVED"
+    currency: str = "USD"
+    face: float = 0.0
+    credits_applied: list[CreditApplication] = Field(default_factory=list)
+    credits_total: float = 0.0
+    open: float = 0.0
+    match_status: str | None = None
+    exception_codes: list[str] = Field(default_factory=list)
+    payment_state: PaymentState | None = None
+    payment_run_id: str | None = None
+    payment_confirmation: PaymentConfirmationState | None = None
+    payment_confirmation_id: str | None = None
+    due_date: str = ""
+    bucket: PositionBucket | None = None  # the position's reading at as_of
+    fully_credited: bool = False  # open exactly zero, covered by credits
+
+
+class LedgerCredit(BaseModel):
+    """One credit note on the ledger: its size, the invoice its
+    own document names, and its application state. While
+    UNAPPLIED it carries the reason it sits unapplied, in the
+    same words the packet and the application path use
+    (credits.unapplied_reason) — the ledger never invents a
+    second explanation."""
+
+    record_id: str
+    credit_number: str = ""
+    status: RecordStatus = "RECEIVED"
+    currency: str = "USD"
+    amount: float = 0.0  # positive — the size of the credit
+    credit_state: CreditState | None = None
+    credited_invoice_number: str = ""
+    applied_invoice_record_id: str | None = None
+    unapplied_reason: str | None = None  # None once APPLIED
+
+
+class LedgerBreak(BaseModel):
+    """One open statement break against this supplier: a line a
+    reconciliation classified as anything but matched, on a
+    reconciliation no controller has accepted. Both figures
+    ride along whenever both exist — the break is the two
+    numbers, exactly as reconciliation left them."""
+
+    reconciliation_id: str
+    statement_record_id: str
+    period: str = ""
+    recon_status: ReconStatus = "AWAITING_CONTROLLER"
+    invoice_number: str
+    classification: ReconClass
+    statement_amount: float | None = None
+    ap_amount: float | None = None
+    currency: str = "USD"
+    note: str = ""
+
+
+class LedgerBank(BaseModel):
+    """The supplier's bank details AS THE MASTER RECORDS THEM —
+    the only bank details a ledger ever shows. A document that
+    presented different details put the supplier on fraud hold
+    at intake; that warning rides here in the guardrail's own
+    words, with the records that raised it. ``warning`` is
+    None exactly when no document on file disagrees with the
+    master."""
+
+    bank_name: str = ""
+    bank_account: str = ""  # the master's approved account
+    warning: str | None = None
+    flags: list[str] = Field(default_factory=list)
+    flagged_record_ids: list[str] = Field(default_factory=list)
+
+
+class LedgerCurrencyTotals(BaseModel):
+    """The ledger's payable totals for one currency, and their
+    tie to the position: the ledger sums every APPROVED invoice
+    at its open amount; the position's supplier row sums the
+    same universe aged at the same as-of — the open figure
+    does not depend on the as-of, only its ageing does, so the
+    two must agree to the cent. When they cannot — a corrupted
+    record the position keeps out of its ageing as a named
+    anomaly — the difference is carried here, not smoothed."""
+
+    currency: str = "USD"
+    approved_invoices: int = 0
+    face_total: float = 0.0
+    credits_total: float = 0.0
+    open_total: float = 0.0
+    position_open_total: float = 0.0
+    difference: float = 0.0  # ledger open − position open
+    tied: bool = True
+
+
+class SupplierLedger(BaseModel):
+    """One supplier, the whole relationship (ledger.py): the
+    master identity and its bank, every document joined to
+    it, every invoice's money story, every credit and its
+    state, the statement breaks still open against it, and
+    totals that tie to the AP position at ``as_of``. A read
+    model — building it writes nothing and moves no money."""
+
+    supplier_id: str
+    supplier_name: str
+    master_currency: str = "USD"
+    as_of: str
+    bank: LedgerBank
+    documents: list[LedgerDocument] = Field(default_factory=list)
+    invoices: list[LedgerInvoice] = Field(default_factory=list)
+    credits: list[LedgerCredit] = Field(default_factory=list)
+    open_breaks: list[LedgerBreak] = Field(default_factory=list)
+    totals: list[LedgerCurrencyTotals] = Field(default_factory=list)
+    tie_status: TieStatus = "TIED"
+    note: str = (
+        "Totals cover APPROVED invoices at their open amounts and tie "
+        "to the AP position at the stated as-of. Fraud-held invoices "
+        "are listed with their flags and stand outside both totals — "
+        "the position discloses them beside its own tie the same way."
+    )
+
+
+class UnmatchedDocument(BaseModel):
+    """A document the intake could not join to the supplier
+    master: its extracted supplier name matched no master entry
+    exactly, and no referenced purchase order resolved it. It
+    belongs to no supplier's ledger; it is listed here, with
+    the name as the document wrote it, so a supplier trading
+    under three spellings shows as a data problem instead of a
+    third of the story quietly going missing."""
+
+    record_id: str
+    submission_id: str
+    doc_class: DocClass = "unknown"
+    status: RecordStatus = "RECEIVED"
+    name_as_written: str = ""  # "" when the document names no supplier
+    document_number: str = ""
+    total: float | None = None
+    refusal_reason: str | None = None
+
+
+class SupplierIndexEntry(BaseModel):
+    """One master supplier on the ledger index: what the AP
+    lead needs before opening the page — how much paper, how
+    much is still owed, whether a statement break is open,
+    and whether any document has disagreed with the master's
+    bank details."""
+
+    supplier_id: str
+    supplier_name: str
+    currency: str = "USD"
+    document_counts: dict[str, int] = Field(default_factory=dict)
+    open_totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    open_break_count: int = 0
+    bank_warning: bool = False
+
+
+class SupplierIndex(BaseModel):
+    """The ledger index (ledger.py): every supplier on the
+    master — including those with no documents yet, because
+    the master is the governed list — and, named as its own
+    section, the documents that joined to no supplier at all."""
+
+    as_of: str
+    suppliers: list[SupplierIndexEntry] = Field(default_factory=list)
+    unmatched_count: int = 0
+    unmatched: list[UnmatchedDocument] = Field(default_factory=list)
+    note: str = (
+        "Documents join a supplier by the intake's own discipline: "
+        "the extracted supplier name, matched exactly against the "
+        "master, or the supplier of the purchase order the document "
+        "references. Anything else is listed under Unmatched — never "
+        "attached by resemblance, never dropped."
+    )
+
+
 class ConfirmationLine(BaseModel):
     """One reconciled item of a remittance confirmation: a member
     of the run, answered by the bank's advice — or an advice line

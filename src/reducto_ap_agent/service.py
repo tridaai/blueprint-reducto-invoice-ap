@@ -24,6 +24,12 @@ gate discipline:
   in code — exactly, never within a tolerance — and stops at
   a controller's gate. An advice that names no run on file is
   held UNMATCHED, never guessed onto one.
+- the supplier ledger gathers the whole relationship per
+  supplier — documents, invoices with their credit ledgers,
+  open statement breaks, the master's bank details and any
+  bank-change warning — as a read model whose payable totals
+  tie to the AP position; documents that joined to no supplier
+  are listed as unmatched, never attached by resemblance;
 - credit application sits between the gate and the packet:
   an approved credit note is applied by a named controller
   against the invoice its own document names, in code — to
@@ -67,6 +73,7 @@ from .errors import (
     RecordNotFound,
 )
 from .graph import ApPipeline
+from .ledger import build_index, build_ledger
 from .payments import (
     PAYABLE_CLASSES,
     assemble_run,
@@ -85,6 +92,8 @@ from .schemas import (
     PaymentRun,
     PositionReport,
     Reconciliation,
+    SupplierIndex,
+    SupplierLedger,
     TreasurerDecision,
     UnappliedCredit,
 )
@@ -408,6 +417,42 @@ class ApService:
         key = export_key_for_position(report.as_of)
         self.pipeline.objects.put(key, data, "text/csv")
         return key, export_digest(data), data
+
+    # -- the supplier ledger -------------------------------------
+
+    def supplier_index(self, as_of: str) -> SupplierIndex:
+        """The ledger index: every supplier on the master with
+        its counts and open totals, and the documents that
+        joined to no supplier, named as their own section. A
+        read over the store — building it writes nothing."""
+        return build_index(
+            list(self.store.reference.suppliers.values()),
+            self.store.list(),
+            self.store.list_reconciliations(),
+            as_of,
+        )
+
+    def supplier_ledger(
+        self, supplier_id: str, as_of: str
+    ) -> SupplierLedger:
+        """One supplier's ledger: the whole relationship with
+        every figure tracing to its record, its payable totals
+        tied to the position at ``as_of`` (ledger.py states the
+        construction). An id that is not on the master is a
+        404 — there is no ledger for a supplier AP does not
+        govern, and resemblance to a master name is never a
+        join."""
+        supplier = self.store.reference.suppliers.get(supplier_id)
+        if supplier is None:
+            raise RecordNotFound(
+                f"no supplier {supplier_id} on the supplier master"
+            )
+        return build_ledger(
+            supplier,
+            self.store.list(),
+            self.store.list_reconciliations(),
+            as_of,
+        )
 
     # -- payment runs ----------------------------------------------
 
