@@ -53,6 +53,15 @@ class GateError(ApError):
     status_code = 409
 
 
+class ReconciliationError(ApError):
+    """A reconciliation was asked of something that cannot be
+    reconciled — a record that is not a statement, a statement
+    whose supplier is not on file, a statement with no captured
+    extraction."""
+
+    status_code = 422
+
+
 class InjectionScreened(ApError):
     """Document text carried an instruction-like payload; the
     affected fields were fenced before any model call. Raised only

@@ -10,7 +10,10 @@ gate discipline:
   (fraud is resolved in the supplier master, out of band;
   exceptions go back to the sender with their codes);
 - the payment packet is a read model over APPROVED records — a
-  proposal, computed fresh, that executes nothing.
+  proposal, computed fresh, that executes nothing;
+- statement reconciliation lives here too: computed over
+  records, decided by a named controller, and strictly
+  read-only over the documents it reconciles.
 """
 
 from __future__ import annotations
@@ -21,9 +24,16 @@ from datetime import datetime, timezone
 
 from langgraph.types import Command
 
-from .errors import GateError, RecordNotFound
+from .errors import GateError, ReconciliationError, RecordNotFound
 from .graph import ApPipeline
-from .schemas import DocumentRecord, PaymentLine, PaymentPacket
+from .reconciliation import reconcile_statement
+from .schemas import (
+    ControllerDecision,
+    DocumentRecord,
+    PaymentLine,
+    PaymentPacket,
+    Reconciliation,
+)
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +102,93 @@ class ApService:
             self.pipeline.graph.invoke(Command(resume=dict(pending)), config=config)
             self._pending.pop(record.submission_id, None)
         return self.get_record(record_id)
+
+    # -- statement reconciliation ------------------------------------
+
+    def reconcile(self, statement_record_id: str) -> Reconciliation:
+        """Reconcile one captured statement against AP's records.
+
+        Read-only over document records: this writes exactly one
+        new reconciliation record and touches nothing else — the
+        packet cannot tell it happened (a test pins that)."""
+        record = self.get_record(statement_record_id)
+        if record.doc_class != "statement":
+            raise ReconciliationError(
+                f"record {statement_record_id} is a {record.doc_class}, not a "
+                "statement — only statements reconcile"
+            )
+        if record.extraction is None:
+            raise ReconciliationError(
+                f"statement {statement_record_id} carries no captured "
+                "extraction; its lines were never read"
+            )
+        if record.supplier_id is None:
+            raise ReconciliationError(
+                f"statement {statement_record_id} names a supplier that is "
+                "not on file; there is nothing to reconcile it against"
+            )
+        existing = [
+            r for r in self.store.list_reconciliations()
+            if r.statement_record_id == statement_record_id
+        ]
+        reconciliation_id = f"RECON-{statement_record_id}"
+        if existing:
+            reconciliation_id = f"{reconciliation_id}-{len(existing) + 1}"
+        ap_records = [
+            r for r in self.store.list() if r.supplier_id == record.supplier_id
+        ]
+        recon = reconcile_statement(
+            reconciliation_id, record, ap_records,
+            policy=self.pipeline.policy, created_at=_now(),
+        )
+        return self.store.save_reconciliation(recon)
+
+    def get_reconciliation(self, reconciliation_id: str) -> Reconciliation:
+        recon = self.store.get_reconciliation(reconciliation_id)
+        if recon is None:
+            raise RecordNotFound(f"no reconciliation {reconciliation_id}")
+        return recon
+
+    def list_reconciliations(
+        self, supplier_id: str | None = None
+    ) -> list[Reconciliation]:
+        return self.store.list_reconciliations(supplier_id=supplier_id)
+
+    def decide_reconciliation(
+        self, reconciliation_id: str, action: str, actor: str, note: str = ""
+    ) -> Reconciliation:
+        """The controller's word: accept the reconciliation, or
+        flag it back with a note the AP team acts on. Decisions
+        are final — a corrected statement is a new submission and
+        reconciles afresh — and every decision joins the audit
+        trail; nothing is ever edited in place."""
+        if action not in ("accept", "flag_back"):
+            raise GateError(
+                f"controller action must be 'accept' or 'flag_back', got {action!r}"
+            )
+        if not actor or not actor.strip():
+            raise GateError("a controller decision must name its controller")
+        if action == "flag_back" and not (note and note.strip()):
+            raise GateError(
+                "flagging a reconciliation back requires a note — the AP "
+                "team takes it to the supplier"
+            )
+        recon = self.get_reconciliation(reconciliation_id)
+        if recon.status != "AWAITING_CONTROLLER":
+            raise GateError(
+                f"reconciliation {reconciliation_id} is {recon.status}; only "
+                "AWAITING_CONTROLLER reconciliations can be decided"
+            )
+        recon.decision = ControllerDecision(
+            decision=action, actor=actor, note=note, at=_now()  # type: ignore[arg-type]
+        )
+        recon.status = "ACCEPTED" if action == "accept" else "FLAGGED_BACK"
+        recon.audit.append({
+            "event": "controller_decision", "at": _now(),
+            "detail": f"{action} by {actor}" + (f" — {note}" if note else ""),
+        })
+        recon.updated_at = _now()
+        return self.store.save_reconciliation(recon)
 
     # -- the packet ------------------------------------------------------
 
