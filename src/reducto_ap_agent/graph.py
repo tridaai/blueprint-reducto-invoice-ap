@@ -195,6 +195,23 @@ class ApPipeline:
             result = self._duplicate_check(record, result)
         record.match = result
 
+        if record.doc_class == "credit_note":
+            # A credit note is born UNAPPLIED: it reduces nothing
+            # until a named controller applies it against the
+            # invoice its own document names (credits.py). The
+            # state rides the record from intake so no surface
+            # can mistake an on-file credit for an applied one.
+            record.credit_state = "UNAPPLIED"
+            named = extraction.value("credited_invoice_number")
+            record.audit.append({
+                "event": "credit_unapplied", "at": _now(),
+                "detail": (
+                    "credit note held UNAPPLIED — application is a "
+                    "controller's act against the invoice it names"
+                    + (f" ({named})" if named else
+                       " (the document names no invoice)")),
+            })
+
         if record.fraud_flags:
             record.status = "FRAUD_REVIEW"
             record.audit.append({

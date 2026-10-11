@@ -182,6 +182,34 @@ PaymentConfirmationState = Literal[
     "CONFIRMED", "SHORT_PAID", "OVER_PAID", "MISSING",
 ]
 
+# A credit note's application state. ``UNAPPLIED``: the credit
+# is on file — extracted, matched, and (once the approver's
+# gate passes it) genuine — but no controller has applied it
+# against the invoice it names, so it has reduced nothing.
+# ``APPLIED``: a named controller applied it; the application
+# is recorded on the credited invoice's ledger and the credit
+# carries the invoice's record id. Only credit-note records
+# carry a state; every other class leaves it None.
+CreditState = Literal["UNAPPLIED", "APPLIED"]
+
+
+class CreditApplication(BaseModel):
+    """One credit note applied against one invoice, by a named
+    controller. ``amount`` is positive — the size of the credit
+    — and the invoice's open payable falls by exactly this much.
+    The entry lives on the INVOICE's ledger (``credits_applied``)
+    because that is where the money question is asked: what is
+    still owed on this invoice. The credit note's own record
+    points back via ``applied_invoice_record_id``."""
+
+    credit_record_id: str
+    credit_number: str
+    invoice_record_id: str
+    amount: float
+    currency: str = "USD"
+    actor: str
+    at: str = ""
+
 
 class DocumentRecord(BaseModel):
     """One processed (sub-)document and everything decided about it."""
@@ -203,6 +231,17 @@ class DocumentRecord(BaseModel):
     payment_state: PaymentState | None = None
     payment_confirmation: PaymentConfirmationState | None = None
     payment_confirmation_id: str | None = None
+    # Credit application. Credit-note records carry
+    # ``credit_state`` (UNAPPLIED from intake) and, once applied,
+    # ``applied_invoice_record_id``. Invoice records carry the
+    # ledger ``credits_applied`` — the applications that have
+    # reduced what is still owed on them. The invoice's approved
+    # (extraction) total never changes: it is history. The OPEN
+    # amount — face minus this ledger — is the derived figure
+    # the packet and the payment runs read (credits.py).
+    credit_state: CreditState | None = None
+    credits_applied: list[CreditApplication] = Field(default_factory=list)
+    applied_invoice_record_id: str | None = None
     audit: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
@@ -274,11 +313,39 @@ class Reconciliation(BaseModel):
 
 
 class PaymentLine(BaseModel):
+    """One proposed payment: an approved invoice at its OPEN
+    amount — the approved face (``gross_amount``) minus the
+    credits applied against it, which ride the line so the
+    reader sees why the figure differs from the invoice's
+    face. A fully credited invoice appears at 0.00 with its
+    credits listed: the packet is the AP position, and a known
+    invoice silently vanishing from it would hide exactly the
+    fact the credits explain."""
+
     record_id: str
     supplier_name: str
     invoice_number: str
     currency: str
-    amount: float
+    amount: float  # the open amount — what would actually be paid
+    gross_amount: float = 0.0  # the approved face, before credits
+    credits_applied: list[CreditApplication] = Field(default_factory=list)
+
+
+class UnappliedCredit(BaseModel):
+    """An approved credit note no controller has applied yet,
+    with the reason it currently cannot be applied (or that it
+    is simply awaiting application). It sits on the packet
+    because it is real money the supplier owes back — leaving
+    it off would overstate what AP is about to pay out across
+    the position, and hide the controller's worklist."""
+
+    record_id: str
+    credit_number: str
+    supplier_name: str = ""
+    amount: float  # positive — the size of the credit
+    currency: str = "USD"
+    invoice_number: str = ""  # the invoice the document names, when it names one
+    reason: str = ""
 
 
 class PaymentPacket(BaseModel):
@@ -287,6 +354,7 @@ class PaymentPacket(BaseModel):
 
     packet_id: str
     lines: list[PaymentLine] = Field(default_factory=list)
+    unapplied_credits: list[UnappliedCredit] = Field(default_factory=list)
     totals_by_currency: dict[str, float] = Field(default_factory=dict)
     generated_at: str = ""
     note: str = "Proposed payments for the customer's AP system of record. Nothing here has been paid."
@@ -296,9 +364,13 @@ RunStatus = Literal["AWAITING_TREASURER", "RELEASED", "RETURNED"]
 
 
 class PaymentRunLine(BaseModel):
-    """One member of a payment run: an approved payable record,
-    at the amount its extraction carries (credit notes ride
-    negative — the netting is the packet's rule, reused)."""
+    """One member of a payment run: an approved invoice at its
+    OPEN amount — the approved face (``gross_amount``) minus
+    the credits applied against it, listed on the line so the
+    treasurer sees why the figure that will leave the bank
+    differs from the invoice's face. Credit notes are never
+    members: a credit is applied against an invoice, not paid
+    as a negative instruction (credits.py states the rule)."""
 
     record_id: str
     supplier_id: str | None = None
@@ -306,7 +378,9 @@ class PaymentRunLine(BaseModel):
     invoice_number: str = ""
     doc_class: DocClass = "invoice"
     currency: str = "USD"
-    amount: float = 0.0
+    amount: float = 0.0  # the open (net) amount — what the export instructs
+    gross_amount: float = 0.0  # the approved face, before credits
+    credits_applied: list[CreditApplication] = Field(default_factory=list)
 
 
 class PaymentRefusal(BaseModel):

@@ -72,6 +72,19 @@ class ConfirmationError(ApError):
     status_code = 422
 
 
+class CreditError(ApError):
+    """A credit application was asked of something that cannot
+    be applied — a record that is not a credit note, a credit
+    note with no captured extraction. (A credit that names its
+    invoice but cannot be applied YET — unapproved, over the
+    open amount, its invoice already in a run — is NOT this
+    error: the blocker is a state conflict and raises
+    :class:`GateError` with the blocker's code in the message,
+    the way the other gates refuse.)"""
+
+    status_code = 422
+
+
 class PaymentRunError(ApError):
     """A payment run could not be assembled or released as asked
     — no eligible records, a member whose supplier is not on

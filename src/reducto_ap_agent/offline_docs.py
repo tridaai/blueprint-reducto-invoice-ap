@@ -53,6 +53,7 @@ _FIELD_BY_LABEL = {
     "Issue Date": "invoice_date",
     "Due Date": "due_date",
     "PO Reference": "po_reference",
+    "Credits Invoice": "credited_invoice_number",
     "Currency": "currency",
     "Bank Account": "bank_account",
     "Subtotal": "subtotal",

@@ -58,6 +58,7 @@ INVOICE_SCHEMA: dict[str, Any] = {
         "invoice_date": {"type": "string"},
         "due_date": {"type": "string"},
         "po_reference": {"type": "string"},
+        "credited_invoice_number": {"type": "string"},
         "currency": {"type": "string"},
         "subtotal": {"type": "number"},
         "tax": {"type": "number"},
