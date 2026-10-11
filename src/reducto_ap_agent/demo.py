@@ -6,8 +6,12 @@ reach the gate, and prints what an operator would see: the
 matches, the exceptions with their codes, the fraud hold, the
 refusal — then the two supplier statements reconciled line by
 line with their breaks itemised and a controller's decision on
-each — and the payment packet that proposes, and executes
-nothing.
+each — the payment packet that proposes, and executes
+nothing — and finally a payment run: the approved records
+assembled for a value date, the fraud hold and the exception
+refused by name when they are (mistakenly) asked for, and a
+treasurer releasing the batch into a bank-instruction export
+that still, itself, pays no one.
 """
 
 from __future__ import annotations
@@ -99,6 +103,35 @@ def run_demo() -> ApService:
     for currency, total in packet.totals_by_currency.items():
         print(f"  {'TOTAL':<42} {currency} {total:>10.2f}")
     print(f"\n{packet.note}")
+
+    print("\nPayment run — the batch a treasurer can release or return:")
+    approved_ids = [line.record_id for line in packet.lines]
+    run = service.create_payment_run(
+        "2026-10-16",
+        # The fraud hold and an exception are named too — the run
+        # refuses them by name rather than quietly leaving them out.
+        record_ids=approved_ids + ["REC-SUB-008-0", "REC-SUB-003-0"],
+    )
+    totals = ", ".join(
+        f"{currency} {total:,.2f}" for currency, total in run.totals_by_currency.items()
+    )
+    print(f"\n{run.run_id} — value date {run.value_date} — {run.status} · totals: {totals}")
+    for line in run.lines:
+        print(f"  MEMBER  {line.record_id:<16} {line.supplier_name:<28} "
+              f"{line.invoice_number:<10} {line.currency} {line.amount:>10.2f}")
+    for refusal in run.refusals:
+        print(f"  REFUSED {refusal.record_id:<16} {refusal.code}: {refusal.reason}")
+    released = service.decide_payment_run(
+        run.run_id, "release", "Jonas Weber (treasurer)", "demo: batch reviewed"
+    )
+    print(f"  → {released.status} by Jonas Weber (treasurer)")
+    print(f"  export: {released.export_key} · sha256 {released.export_digest[:16]}…")
+    export_text = service.payment_run_export(run.run_id).decode("utf-8")
+    for row in export_text.splitlines()[:4]:
+        print(f"    {row}")
+    print("    …")
+    print("\nThe export is a file for the customer's payment systems. "
+          "This system has still paid nothing.")
     return service
 
 

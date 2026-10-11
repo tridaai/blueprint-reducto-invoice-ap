@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from . import db
@@ -50,6 +50,18 @@ class ReconDecisionRequest(BaseModel):
     action: str  # "accept" | "flag_back"
     actor: str
     note: str = ""
+
+
+class PaymentRunRequest(BaseModel):
+    value_date: str
+    record_ids: list[str] | None = None  # None = every approved payable record
+    currencies: list[str] | None = None  # None/empty = all currencies
+
+
+class TreasurerDecisionRequest(BaseModel):
+    action: str  # "release" | "return"
+    actor: str
+    reason: str = ""
 
 
 def create_app(service: ApService | None = None) -> FastAPI:
@@ -190,6 +202,42 @@ def create_app(service: ApService | None = None) -> FastAPI:
     @app.get("/payments/packet")
     def payment_packet() -> dict:
         return svc().payment_packet().model_dump()
+
+    @app.post("/payments/runs", status_code=201)
+    def create_payment_run(request: PaymentRunRequest) -> dict:
+        run = svc().create_payment_run(
+            request.value_date,
+            record_ids=request.record_ids,
+            currencies=request.currencies,
+        )
+        return run.model_dump()
+
+    @app.get("/payments/runs")
+    def list_payment_runs(status: str | None = None) -> list[dict]:
+        return [r.model_dump() for r in svc().list_payment_runs(status=status)]
+
+    @app.get("/payments/runs/{run_id}")
+    def get_payment_run(run_id: str) -> dict:
+        return svc().get_payment_run(run_id).model_dump()
+
+    @app.post("/payments/runs/{run_id}/decision")
+    def decide_payment_run(run_id: str, request: TreasurerDecisionRequest) -> dict:
+        run = svc().decide_payment_run(
+            run_id, request.action, request.actor, request.reason
+        )
+        return run.model_dump()
+
+    @app.get("/payments/runs/{run_id}/export")
+    def payment_run_export(run_id: str) -> Response:
+        data = svc().payment_run_export(run_id)
+        return Response(
+            content=data,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="{run_id}-payment-instructions.csv"'
+            },
+        )
 
     @app.get("/suppliers")
     def suppliers() -> list[dict]:

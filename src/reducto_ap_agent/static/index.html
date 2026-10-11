@@ -52,6 +52,9 @@
   .st-ACCEPTED { color: var(--ok); }
   .st-AWAITING_CONTROLLER { color: var(--indigo); }
   .st-FLAGGED_BACK { color: var(--bad); }
+  .st-AWAITING_TREASURER { color: var(--indigo); }
+  .st-RELEASED { color: var(--ok); }
+  .st-RETURNED { color: var(--warn); }
   .rc-matched { color: var(--ok); font-weight: 600; }
   .rc-amount_disagrees, .rc-duplicates_within_statement { color: var(--warn); font-weight: 600; }
   .rc-missing_in_ap, .rc-missing_on_statement { color: var(--bad); font-weight: 600; }
@@ -117,6 +120,19 @@
     <p class="note" style="margin-top:0;">A statement is the supplier's claim about what is still owed. Reconciliation answers it line by line from AP's own records — it is evidence for the controller, and it never changes what is payable.</p>
     <div id="recon-statements" class="note">No statements yet — load the demo world.</div>
     <div id="recon-list"></div>
+  </section>
+</div>
+<div style="padding: 0 28px 8px;">
+  <section>
+    <h2>Payment runs</h2>
+    <p class="note" style="margin-top:0;">The packet proposes; a run commits a batch to one value date under a treasurer's gate. Assembly holds each member on its record, refuses fraud-held and exception records by name, and ties the totals to the lines. Release generates the bank-instruction export — bank details from the supplier master, never the invoice — and pays nothing itself.</p>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <input id="run-value-date" type="date" value="2026-10-16">
+      <input id="run-currencies" placeholder="Currencies (blank = all, e.g. USD,EUR)" size="30">
+      <button id="create-run">Assemble run from approved records</button>
+    </div>
+    <p class="note" id="run-error"></p>
+    <div id="run-list" class="note">No payment runs yet.</div>
   </section>
 </div>
 <footer>
@@ -208,6 +224,8 @@ async function showRecord(id) {
   }
   if (r.decision)
     html += `<p class="note" style="margin-top:10px;">Gate: ${r.decision.decision} by ${r.decision.actor}${r.decision.reason ? " — " + r.decision.reason : ""}</p>`;
+  if (r.payment_run_id)
+    html += `<p class="note" style="margin-top:6px;">Payment: ${r.payment_state === "PAID_PROPOSED" ? "paid-proposed in released run" : "held in open run"} ${r.payment_run_id}</p>`;
   if (r.status === "AWAITING_APPROVER") {
     html += `<div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap;">
       <input id="actor" placeholder="Approver name (required)">
@@ -288,10 +306,65 @@ async function loadRecons() {
   });
 }
 
-$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); });
-$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); });
+async function loadRuns() {
+  const runs = await api("/payments/runs");
+  const host = $("run-list");
+  if (!runs.length) { host.innerHTML = "No payment runs yet."; return; }
+  host.classList.remove("note");
+  host.innerHTML = runs.map(run => {
+    const totals = Object.entries(run.totals_by_currency)
+      .map(([c, t]) => `${c} ${money(t)}`).join(" · ");
+    let html = `<h2 style="margin-top:18px;">${run.run_id} — value date ${run.value_date}</h2>
+      <p class="note">Status <span class="status st-${run.status}">${run.status}</span> · totals: ${totals}${run.currencies.length ? " · scope: " + run.currencies.join(", ") : ""}</p>`;
+    html += `<table><thead><tr><th>Record</th><th>Supplier</th><th>Invoice</th><th>Currency</th><th>Amount</th></tr></thead><tbody>`
+      + run.lines.map(l => `<tr><td>${l.record_id}</td><td>${l.supplier_name}</td><td>${l.invoice_number}</td><td>${l.currency}</td><td>${money(l.amount)}</td></tr>`).join("")
+      + `</tbody></table>`;
+    (run.refusals || []).forEach(rf =>
+      html += `<p class="flag">Refused ${rf.record_id} — ${rf.code}: ${rf.reason}</p>`);
+    if (run.decision)
+      html += `<p class="note" style="margin-top:8px;">Treasurer: ${run.decision.decision} by ${run.decision.actor}${run.decision.reason ? " — " + run.decision.reason : ""}</p>`;
+    if (run.status === "RELEASED")
+      html += `<p class="note" style="margin-top:8px;">Export: <a href="/payments/runs/${run.run_id}/export">download payment instructions (CSV)</a> · sha256 ${(run.export_digest || "").slice(0, 16)}… · key ${run.export_key}</p>`;
+    if (run.status === "AWAITING_TREASURER")
+      html += `<div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <input id="tr-actor-${run.run_id}" placeholder="Treasurer name (required)">
+        <input id="tr-reason-${run.run_id}" placeholder="Reason (required to return)">
+        <button data-release="${run.run_id}">Release</button>
+        <button class="secondary" data-return="${run.run_id}">Return</button></div>
+        <p class="note" id="tr-error-${run.run_id}"></p>`;
+    return html;
+  }).join("");
+  document.querySelectorAll("button[data-release], button[data-return]").forEach(b => {
+    const id = b.dataset.release || b.dataset.return;
+    const action = b.dataset.release ? "release" : "return";
+    b.addEventListener("click", async () => {
+      try {
+        await api(`/payments/runs/${id}/decision`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({action, actor: $("tr-actor-" + id).value, reason: $("tr-reason-" + id).value}),
+        });
+        await loadRuns(); await loadRecords();
+      } catch (e) { $("tr-error-" + id).textContent = e.message; }
+    });
+  });
+}
+
+$("create-run").addEventListener("click", async () => {
+  $("run-error").textContent = "";
+  const currencies = $("run-currencies").value.split(",").map(s => s.trim()).filter(Boolean);
+  try {
+    await api("/payments/runs", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({value_date: $("run-value-date").value, currencies: currencies.length ? currencies : null}),
+    });
+    await loadRuns(); await loadRecords();
+  } catch (e) { $("run-error").textContent = e.message; }
+});
+
+$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); });
+$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); });
 $("status-filter").addEventListener("change", loadRecords);
-readiness(); loadRecords(); loadRecons();
+readiness(); loadRecords(); loadRecons(); loadRuns();
 </script>
 </body>
 </html>
