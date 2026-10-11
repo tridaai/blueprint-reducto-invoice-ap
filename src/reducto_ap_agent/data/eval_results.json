@@ -70,6 +70,13 @@
     "story_complete": true,
     "bank_warning_matches_master": true
   },
+  "paid_duplicate_watch": {
+    "exact_resend_held_with_evidence": true,
+    "released_record_decidable": true,
+    "net_basis_named": true,
+    "boundaries_hold": true,
+    "resolution_discipline": true
+  },
   "failures": [],
   "gates": {
     "match_decision_accuracy == 1.0": true,
@@ -101,7 +108,11 @@
     "ledger_totals_tie_to_position": true,
     "ledger_unmatched_listed_nowhere_else": true,
     "ledger_story_complete": true,
-    "ledger_bank_warning_matches_master": true
+    "ledger_bank_warning_matches_master": true,
+    "duplicate_watch_holds_the_paid_resend": true,
+    "duplicate_watch_released_record_decidable": true,
+    "duplicate_watch_net_basis_and_boundaries": true,
+    "duplicate_watch_resolution_discipline": true
   },
   "gate_passed": true
 }

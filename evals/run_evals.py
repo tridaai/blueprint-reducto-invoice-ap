@@ -70,6 +70,21 @@ Gates (a failure exits non-zero):
   reason, four open statement breaks); and the bank warning
   is present exactly where a document disagreed with the
   master — Granite Peak — and nowhere else.
+- paid-duplicate watch — the duplicate that arrives second:
+  on the main service, an invoice released in a run is
+  re-submitted verbatim and held on the paid evidence (run,
+  treasurer, the instructed amount), the gate's refusal names
+  that evidence, and a controller's release makes the record
+  decidable again at a gate that closed when it was
+  submitted. In a planted universe (a paid record and its
+  released run planted directly, the position scenario's
+  idiom), a re-bill at the net figure is held on the NET
+  basis, a different amount is surfaced by the number rule
+  and not held, a different number at the paid amount is not
+  held, resolutions without actor or reason are refused, a
+  confirmed hold refuses permanently, a second arrival
+  re-holds after a release, and the paid record and its run
+  are byte-identical throughout.
 
 Reported, not gated: per-field extraction accuracy, review-queue
 precision. A live run (EVAL_LIVE=1, DOCUMENT_BACKEND=reducto,
@@ -87,7 +102,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from reducto_ap_agent.datasets import _doc, build_world, remittance_advice_doc  # noqa: E402
+from reducto_ap_agent.datasets import _doc, _inv_fields, build_world, remittance_advice_doc  # noqa: E402
 from reducto_ap_agent.errors import GateError  # noqa: E402
 from reducto_ap_agent.graph import ApPipeline  # noqa: E402
 from reducto_ap_agent.object_store import InMemoryObjectStore  # noqa: E402
@@ -98,6 +113,9 @@ from reducto_ap_agent.schemas import (  # noqa: E402
     ExtractedDocument,
     ExtractedField,
     LineItem,
+    PaymentRun,
+    PaymentRunLine,
+    TreasurerDecision,
 )
 from reducto_ap_agent.service import ApService  # noqa: E402
 from reducto_ap_agent.store import InMemoryRecordStore  # noqa: E402
@@ -760,6 +778,183 @@ def evaluate(service: ApService) -> dict:
         "tie_break_named": tie_break_named,
     }
 
+    # -- paid-duplicate watch ----------------------------------
+    # Runs last on the main service: INV-1013 (EUR, Larkspur)
+    # was approved in the payment-run section and freed by
+    # every run that held it, so it can be released on its own
+    # here without disturbing any earlier result.
+    dup_run = service.create_payment_run(
+        "2026-11-13", record_ids=["REC-SUB-013-0"])
+    service.decide_payment_run(
+        dup_run.run_id, "release", "Eval Treasurer", "eval: batch reviewed")
+    sub013_text = next(
+        s.text for s in world.submissions if s.submission_id == "SUB-013")
+    (dup_resend,) = service.submit(
+        "SUB-EVAL-DUP", "sub-eval-dup.pdf",
+        sub013_text.encode("utf-8"), "text/plain")
+    dup_hold = dup_resend.duplicate_hold
+    exact_held = (
+        dup_resend.status == "PAID_DUPLICATE_HOLD"
+        and dup_hold is not None
+        and dup_hold.original_record_id == "REC-SUB-013-0"
+        and dup_hold.payment_run_id == dup_run.run_id
+        and dup_hold.released_by == "Eval Treasurer"
+        and dup_hold.amount_paid == 1080.00
+        and dup_hold.paid_face_amount == 1080.00
+        and dup_hold.arrived_amount == 1080.00
+        and dup_hold.amount_basis == "FACE"
+        and dup_hold.currency == "EUR"
+    )
+    try:
+        service.decide(dup_resend.record_id, "approve",
+                       "Eval Approver", "eval: pay it again")
+        gate_refusal = ""
+    except GateError as exc:
+        gate_refusal = str(exc)
+    service.resolve_duplicate_hold(
+        dup_resend.record_id, "RELEASED_NOT_DUPLICATE",
+        "Eval Controller",
+        "eval: a second site billed under the same number; "
+        "this copy is the plant's own bill")
+    decided = service.decide(
+        dup_resend.record_id, "approve", "Eval Approver",
+        "eval: adjudicated not a duplicate")
+    released_decidable = (
+        "paid-duplicate watch" in gate_refusal
+        and dup_run.run_id in gate_refusal
+        and decided.status == "APPROVED"
+        and decided.decision is not None
+        and decided.decision.actor == "Eval Approver"
+    )
+
+    # The planted universe: a paid record and its released
+    # run, planted directly (the position scenario's idiom),
+    # so the face, the applied credit, and the instructed net
+    # are exact: face 1000.00, CN-EV-D1 applied 300.00, the
+    # run instructed 700.00.
+    watch_service = build_offline_service()
+    s02 = world.supplier("SUP-02")
+    credit_entry = CreditApplication(
+        credit_record_id="REC-EV-D1-CR", credit_number="CN-EV-D1",
+        invoice_record_id="REC-EV-D1", amount=300.00, currency="USD",
+        actor="Eval Controller", at="2026-10-15T10:00:00+00:00")
+    watch_service.store.save(DocumentRecord(
+        record_id="REC-EV-D1", submission_id="SUB-EV-DUP",
+        supplier_id="SUP-02", supplier_name=s02.name,
+        status="APPROVED", doc_class="invoice",
+        extraction=ExtractedDocument(doc_class="invoice", fields={
+            "invoice_number": ExtractedField(value="INV-EV-D1"),
+            "total": ExtractedField(value=1000.00),
+        }, currency="USD"),
+        payment_run_id="RUN-EV-DUP", payment_state="PAID_PROPOSED",
+        credits_applied=[credit_entry],
+    ))
+    watch_service.store.save_payment_run(PaymentRun(
+        run_id="RUN-EV-DUP", value_date="2026-10-16", status="RELEASED",
+        lines=[PaymentRunLine(
+            record_id="REC-EV-D1", supplier_id="SUP-02",
+            supplier_name=s02.name, invoice_number="INV-EV-D1",
+            currency="USD", amount=700.00, gross_amount=1000.00,
+            credits_applied=[credit_entry])],
+        totals_by_currency={"USD": 700.00},
+        decision=TreasurerDecision(
+            decision="release", actor="Eval Treasurer",
+            reason="eval: batch reviewed", at="2026-10-16T09:30:00+00:00"),
+        created_at="2026-10-16T09:00:00+00:00",
+        updated_at="2026-10-16T09:30:00+00:00",
+    ))
+    twin_before = watch_service.get_record("REC-EV-D1").model_dump_json()
+    run_before = watch_service.get_payment_run("RUN-EV-DUP").model_dump_json()
+
+    def dup_text(number: str, total: float) -> str:
+        return _doc("INVOICE", 1, _inv_fields(
+            s02, number, "PO-6001", total), [
+            LineItem(sku="SKU-A1", description="Industrial valves",
+                     quantity=10, unit_price=120.00, amount=1200.00),
+            LineItem(sku="SKU-A2", description="Gasket sets",
+                     quantity=5, unit_price=40.00, amount=200.00),
+        ])
+
+    def dup_submit(submission_id: str, number: str, total: float):
+        (record,) = watch_service.submit(
+            submission_id, f"{submission_id.lower()}.pdf",
+            dup_text(number, total).encode("utf-8"), "text/plain")
+        return record
+
+    net_resend = dup_submit("SUB-EV-NET", "INV-EV-D1", 700.00)
+    net_basis_named = (
+        net_resend.status == "PAID_DUPLICATE_HOLD"
+        and net_resend.duplicate_hold is not None
+        and net_resend.duplicate_hold.amount_basis == "NET"
+        and net_resend.duplicate_hold.amount_paid == 700.00
+        and net_resend.duplicate_hold.paid_face_amount == 1000.00
+        and net_resend.duplicate_hold.released_at
+        == "2026-10-16T09:30:00+00:00"
+    )
+    face_resend = dup_submit("SUB-EV-FACE", "INV-EV-D1", 1000.00)
+    diff_resend = dup_submit("SUB-EV-DIFF", "INV-EV-D1", 850.00)
+    new_number = dup_submit("SUB-EV-NEWNUM", "INV-EV-D9", 700.00)
+    boundaries_hold = (
+        face_resend.status == "PAID_DUPLICATE_HOLD"
+        and face_resend.duplicate_hold.amount_basis == "FACE"
+        and diff_resend.status == "EXCEPTION"
+        and "DUPLICATE_INVOICE" in diff_resend.match.exception_codes
+        and diff_resend.duplicate_hold is None
+        and new_number.status != "PAID_DUPLICATE_HOLD"
+        and new_number.duplicate_hold is None
+    )
+
+    def resolution_refusal(record_id: str, action: str,
+                           actor: str, reason: str) -> str:
+        try:
+            watch_service.resolve_duplicate_hold(
+                record_id, action, actor, reason)
+        except GateError as exc:
+            return str(exc)
+        return ""
+
+    discipline = (
+        "requires a reason" in resolution_refusal(
+            net_resend.record_id, "CONFIRMED_DUPLICATE",
+            "Eval Controller", "")
+        and "must name its controller" in resolution_refusal(
+            net_resend.record_id, "CONFIRMED_DUPLICATE", "", "a reason")
+    )
+    confirmed = watch_service.resolve_duplicate_hold(
+        net_resend.record_id, "CONFIRMED_DUPLICATE", "Eval Controller",
+        "eval: the supplier confirmed the original was paid")
+    re_arrival = dup_submit("SUB-EV-NET-2", "INV-EV-D1", 700.00)
+    face_released = watch_service.resolve_duplicate_hold(
+        face_resend.record_id, "RELEASED_NOT_DUPLICATE",
+        "Eval Controller", "eval: adjudicated a different bill")
+    resolution_discipline = (
+        discipline
+        and confirmed.status == "REFUSED"
+        and confirmed.duplicate_hold.resolution.action
+        == "CONFIRMED_DUPLICATE"
+        and re_arrival.status == "PAID_DUPLICATE_HOLD"
+        and re_arrival.duplicate_hold.resolution is None
+        # A release restores the record's own verdict, it does
+        # not launder it: the face resend's stated total never
+        # agreed with its own lines, and that exception stands.
+        # (The released-and-then-decided path is proven on the
+        # main service above, where the resend matched cleanly.)
+        and face_released.status == "EXCEPTION"
+        and "TOTAL_MISMATCH" in face_released.match.exception_codes
+        # The payment's own records never moved.
+        and watch_service.get_record("REC-EV-D1").model_dump_json()
+        == twin_before
+        and watch_service.get_payment_run("RUN-EV-DUP").model_dump_json()
+        == run_before
+    )
+    watch_results = {
+        "exact_resend_held_with_evidence": exact_held,
+        "released_record_decidable": released_decidable,
+        "net_basis_named": net_basis_named,
+        "boundaries_hold": boundaries_hold,
+        "resolution_discipline": resolution_discipline,
+    }
+
     total_cases = len(cases)
     passed = sum(1 for c in cases if c["passed"])
     results = {
@@ -783,6 +978,7 @@ def evaluate(service: ApService) -> dict:
         "credit_notes": credit_results,
         "ap_position": position_results,
         "supplier_ledger": ledger_results,
+        "paid_duplicate_watch": watch_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
@@ -829,6 +1025,16 @@ def evaluate(service: ApService) -> dict:
         "ledger_story_complete": ledger_results["story_complete"],
         "ledger_bank_warning_matches_master":
             ledger_results["bank_warning_matches_master"],
+        "duplicate_watch_holds_the_paid_resend":
+            watch_results["exact_resend_held_with_evidence"],
+        "duplicate_watch_released_record_decidable":
+            watch_results["released_record_decidable"],
+        "duplicate_watch_net_basis_and_boundaries": (
+            watch_results["net_basis_named"]
+            and watch_results["boundaries_hold"]
+        ),
+        "duplicate_watch_resolution_discipline":
+            watch_results["resolution_discipline"],
     }
     results["gate_passed"] = all(results["gates"].values())
     return results
