@@ -1,13 +1,13 @@
 """The record store: processed documents and their decisions.
 
 Two implementations of one small surface — ``save``, ``get``,
-``list``, plus the same trio for statement reconciliations —
-because the deployment gets PostgreSQL and the test suite gets
-a double with identical behaviour:
+``list``, plus the same trio for statement reconciliations
+and for payment runs — because the deployment gets PostgreSQL
+and the test suite gets a double with identical behaviour:
 
 - :class:`PostgresRecordStore` — the production store (JSONB
-  payloads in the ``records`` and ``reconciliations`` tables;
-  migrations ``0001`` and ``0002``).
+  payloads in the ``records``, ``reconciliations``, and
+  ``payment_runs`` tables; migrations ``0001``–``0003``).
 - :class:`InMemoryRecordStore` — the double. When it is live,
   ``/readiness`` says so: nothing persists past the process.
 
@@ -24,7 +24,14 @@ import json
 import threading
 
 from .db import database_url, ensure_migrated
-from .schemas import DocumentRecord, GoodsReceipt, PurchaseOrder, Reconciliation, Supplier
+from .schemas import (
+    DocumentRecord,
+    GoodsReceipt,
+    PaymentRun,
+    PurchaseOrder,
+    Reconciliation,
+    Supplier,
+)
 
 
 class ReferenceData:
@@ -60,6 +67,8 @@ class InMemoryRecordStore:
         self._order: list[str] = []
         self._recons: dict[str, Reconciliation] = {}
         self._recon_order: list[str] = []
+        self._runs: dict[str, PaymentRun] = {}
+        self._run_order: list[str] = []
         self._lock = threading.Lock()
         self.reference = ReferenceData()
 
@@ -96,6 +105,24 @@ class InMemoryRecordStore:
         if supplier_id:
             recons = [r for r in recons if r.supplier_id == supplier_id]
         return recons
+
+    def save_payment_run(self, run: PaymentRun) -> PaymentRun:
+        with self._lock:
+            if run.run_id not in self._runs:
+                self._run_order.append(run.run_id)
+            self._runs[run.run_id] = run
+        return run
+
+    def get_payment_run(self, run_id: str) -> PaymentRun | None:
+        return self._runs.get(run_id)
+
+    def list_payment_runs(
+        self, status: str | None = None
+    ) -> list[PaymentRun]:
+        runs = [self._runs[rid] for rid in self._run_order]
+        if status:
+            runs = [r for r in runs if r.status == status]
+        return runs
 
 
 class PostgresRecordStore:
@@ -192,6 +219,45 @@ class PostgresRecordStore:
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         return [Reconciliation.model_validate(row["payload"]) for row in rows]
+
+    def save_payment_run(self, run: PaymentRun) -> PaymentRun:
+        from psycopg.types.json import Jsonb
+
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO payment_runs (run_id, value_date, payload, status) "
+                "VALUES (%s, %s, %s, %s) "
+                "ON CONFLICT (run_id) DO UPDATE SET payload = EXCLUDED.payload, "
+                "status = EXCLUDED.status, updated_at = now()",
+                (
+                    run.run_id,
+                    run.value_date,
+                    Jsonb(json.loads(run.model_dump_json())),
+                    run.status,
+                ),
+            )
+            conn.commit()
+        return run
+
+    def get_payment_run(self, run_id: str) -> PaymentRun | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM payment_runs WHERE run_id = %s", (run_id,)
+            ).fetchone()
+        return PaymentRun.model_validate(row["payload"]) if row else None
+
+    def list_payment_runs(
+        self, status: str | None = None
+    ) -> list[PaymentRun]:
+        query = "SELECT payload FROM payment_runs"
+        params: tuple = ()
+        if status:
+            query += " WHERE status = %s"
+            params = (status,)
+        query += " ORDER BY seq"
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [PaymentRun.model_validate(row["payload"]) for row in rows]
 
 
 def default_store() -> InMemoryRecordStore | PostgresRecordStore:

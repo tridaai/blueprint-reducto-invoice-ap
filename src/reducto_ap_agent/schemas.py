@@ -141,6 +141,17 @@ class GateDecision(BaseModel):
     at: str = ""
 
 
+# A record's payment-run membership. ``IN_RUN``: held by an open
+# run awaiting the treasurer. ``PAID_PROPOSED``: the run was
+# released — the record sits in a bank-instruction export as a
+# proposal. Terminal: a paid-proposed record never joins another
+# run. This is deliberately NOT a RecordStatus: the record stays
+# APPROVED, because the approver's decision and the treasurer's
+# batch are two different humans' acts and neither rewrites the
+# other.
+PaymentState = Literal["IN_RUN", "PAID_PROPOSED"]
+
+
 class DocumentRecord(BaseModel):
     """One processed (sub-)document and everything decided about it."""
 
@@ -157,6 +168,8 @@ class DocumentRecord(BaseModel):
     injection_flags: list[str] = Field(default_factory=list)
     bank_account_seen: str | None = None
     decision: GateDecision | None = None
+    payment_run_id: str | None = None
+    payment_state: PaymentState | None = None
     audit: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
@@ -244,3 +257,71 @@ class PaymentPacket(BaseModel):
     totals_by_currency: dict[str, float] = Field(default_factory=dict)
     generated_at: str = ""
     note: str = "Proposed payments for the customer's AP system of record. Nothing here has been paid."
+
+
+RunStatus = Literal["AWAITING_TREASURER", "RELEASED", "RETURNED"]
+
+
+class PaymentRunLine(BaseModel):
+    """One member of a payment run: an approved payable record,
+    at the amount its extraction carries (credit notes ride
+    negative — the netting is the packet's rule, reused)."""
+
+    record_id: str
+    supplier_id: str | None = None
+    supplier_name: str = ""
+    invoice_number: str = ""
+    doc_class: DocClass = "invoice"
+    currency: str = "USD"
+    amount: float = 0.0
+
+
+class PaymentRefusal(BaseModel):
+    """A record a run was asked to take and refused, with the
+    reason in words. A run assembles from the eligible remainder
+    and reports every refusal — nothing is silently dropped."""
+
+    record_id: str
+    code: str
+    reason: str
+
+
+class TreasurerDecision(BaseModel):
+    """The treasurer's word on a run. ``return`` requires a
+    reason — the AP team reworks the batch on it."""
+
+    decision: Literal["release", "return"]
+    actor: str
+    reason: str = ""
+    at: str = ""
+
+
+class PaymentRun(BaseModel):
+    """A stored payment run: approved payable records assembled
+    for one value date, every refusal named, totals tied to the
+    member lines, and a treasurer's gate on top. On release the
+    bank-instruction export is generated once, stored in the
+    object store, and pinned here by key + SHA-256 digest.
+
+    A run is still a proposal. ``RELEASED`` means a human
+    released the batch for the customer's payment systems to
+    execute — nothing in this system executes a payment."""
+
+    run_id: str
+    value_date: str
+    currencies: list[str] = Field(default_factory=list)  # empty = all currencies
+    status: RunStatus = "AWAITING_TREASURER"
+    lines: list[PaymentRunLine] = Field(default_factory=list)
+    refusals: list[PaymentRefusal] = Field(default_factory=list)
+    totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    decision: TreasurerDecision | None = None
+    export_key: str | None = None
+    export_digest: str | None = None
+    export_generated_at: str | None = None
+    audit: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+    note: str = (
+        "A controlled proposal batch: released means handed to the "
+        "customer's payment systems, not paid by this system."
+    )

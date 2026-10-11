@@ -13,7 +13,12 @@ gate discipline:
   proposal, computed fresh, that executes nothing;
 - statement reconciliation lives here too: computed over
   records, decided by a named controller, and strictly
-  read-only over the documents it reconciles.
+  read-only over the documents it reconciles;
+- payment runs assemble approved records into a stored batch
+  for one value date — one open run per record, every refusal
+  named — and stop at a treasurer's gate. Release generates
+  the bank-instruction export once and locks the batch;
+  return frees every member. Neither pays anything.
 """
 
 from __future__ import annotations
@@ -24,15 +29,24 @@ from datetime import datetime, timezone
 
 from langgraph.types import Command
 
-from .errors import GateError, ReconciliationError, RecordNotFound
+from .errors import GateError, PaymentRunError, ReconciliationError, RecordNotFound
 from .graph import ApPipeline
+from .payments import (
+    PAYABLE_CLASSES,
+    assemble_run,
+    build_export_csv,
+    export_digest,
+    export_key_for,
+)
 from .reconciliation import reconcile_statement
 from .schemas import (
     ControllerDecision,
     DocumentRecord,
     PaymentLine,
     PaymentPacket,
+    PaymentRun,
     Reconciliation,
+    TreasurerDecision,
 )
 
 log = logging.getLogger(__name__)
@@ -214,3 +228,163 @@ class ApService:
             totals_by_currency=totals,
             generated_at=_now(),
         )
+
+    # -- payment runs ----------------------------------------------
+
+    def _next_run_id(self, value_date: str) -> str:
+        n = len(self.store.list_payment_runs()) + 1
+        while True:
+            run_id = f"RUN-{value_date}-{n:02d}"
+            if self.store.get_payment_run(run_id) is None:
+                return run_id
+            n += 1
+
+    def create_payment_run(
+        self,
+        value_date: str,
+        record_ids: list[str] | None = None,
+        currencies: list[str] | None = None,
+    ) -> PaymentRun:
+        """Assemble a payment run and hold its members.
+
+        Candidates are the named records, in the order named,
+        or — unnamed — every APPROVED payable record, the
+        packet's universe. Ineligible candidates ride the run
+        as named refusals; an unknown named id fails loudly
+        (a mistyped id must never silently shrink a batch);
+        zero eligible records fails the assembly outright.
+        Members are marked IN_RUN on their records, so a second
+        assembly can only refuse them by name.
+        """
+        if not value_date or not value_date.strip():
+            raise PaymentRunError("a payment run needs a value date")
+        value_date = value_date.strip()
+        if record_ids is not None:
+            candidates: list[DocumentRecord] = []
+            seen: set[str] = set()
+            for record_id in record_ids:
+                if record_id in seen:
+                    continue
+                seen.add(record_id)
+                candidates.append(self.get_record(record_id))
+        else:
+            candidates = [
+                rec for rec in self.store.list()
+                if rec.status == "APPROVED" and rec.doc_class in PAYABLE_CLASSES
+            ]
+        run = assemble_run(
+            self._next_run_id(value_date), value_date, candidates,
+            currencies=currencies, created_at=_now(),
+        )
+        for line in run.lines:
+            record = self.get_record(line.record_id)
+            record.payment_run_id = run.run_id
+            record.payment_state = "IN_RUN"
+            record.audit.append({
+                "event": "payment_run_joined", "at": _now(),
+                "detail": f"member of payment run {run.run_id} "
+                          f"(value date {run.value_date})",
+            })
+            record.updated_at = _now()
+            self.store.save(record)
+        return self.store.save_payment_run(run)
+
+    def get_payment_run(self, run_id: str) -> PaymentRun:
+        run = self.store.get_payment_run(run_id)
+        if run is None:
+            raise RecordNotFound(f"no payment run {run_id}")
+        return run
+
+    def list_payment_runs(self, status: str | None = None) -> list[PaymentRun]:
+        return self.store.list_payment_runs(status=status)
+
+    def decide_payment_run(
+        self, run_id: str, action: str, actor: str, reason: str = ""
+    ) -> PaymentRun:
+        """The treasurer's word: release the batch, or return
+        it for rework. Release generates the bank-instruction
+        export first — if the export cannot be built (a member
+        supplier not on file), nothing mutates — then locks
+        every member as PAID_PROPOSED. Return frees every
+        member to join a later run. The records' APPROVED
+        status — the approver's decision — is never touched:
+        the run is a proposal state layered over it."""
+        if action not in ("release", "return"):
+            raise GateError(
+                f"treasurer action must be 'release' or 'return', got {action!r}"
+            )
+        if not actor or not actor.strip():
+            raise GateError("a treasurer decision must name its treasurer")
+        if action == "return" and not (reason and reason.strip()):
+            raise GateError(
+                "returning a payment run requires a reason — the AP "
+                "team reworks the batch on it"
+            )
+        run = self.get_payment_run(run_id)
+        if run.status != "AWAITING_TREASURER":
+            raise GateError(
+                f"payment run {run_id} is {run.status}; only "
+                "AWAITING_TREASURER runs can be decided"
+            )
+        if action == "release":
+            # Build and store the export BEFORE any state moves:
+            # a release that cannot produce its artifact has not
+            # happened, and must not half-happen.
+            data = build_export_csv(run, self.store.reference.suppliers)
+            key = export_key_for(run.run_id)
+            self.pipeline.objects.put(key, data, "text/csv")
+            run.export_key = key
+            run.export_digest = export_digest(data)
+            run.export_generated_at = _now()
+            run.status = "RELEASED"
+        else:
+            run.status = "RETURNED"
+        run.decision = TreasurerDecision(
+            decision=action, actor=actor, reason=reason, at=_now()  # type: ignore[arg-type]
+        )
+        run.audit.append({
+            "event": "treasurer_decision", "at": _now(),
+            "detail": f"{action} by {actor}" + (f" — {reason}" if reason else ""),
+        })
+        run.updated_at = _now()
+        saved = self.store.save_payment_run(run)
+        for line in run.lines:
+            record = self.get_record(line.record_id)
+            if action == "release":
+                record.payment_state = "PAID_PROPOSED"
+                record.audit.append({
+                    "event": "payment_run_paid_proposed", "at": _now(),
+                    "detail": f"released in payment run {run.run_id}; the "
+                              "export proposes this payment — nothing has "
+                              "been paid by this system",
+                })
+            else:
+                record.payment_run_id = None
+                record.payment_state = None
+                record.audit.append({
+                    "event": "payment_run_freed", "at": _now(),
+                    "detail": f"payment run {run.run_id} was returned by "
+                              f"{actor}; free to join a later run",
+                })
+            record.updated_at = _now()
+            self.store.save(record)
+        return saved
+
+    def payment_run_export(self, run_id: str) -> bytes:
+        """The released run's bank-instruction CSV, byte for
+        byte as generated at release — served from the object
+        store, never recomputed, so what the treasurer released
+        is what anyone can ever download."""
+        run = self.get_payment_run(run_id)
+        if run.status != "RELEASED" or run.export_key is None:
+            raise GateError(
+                f"payment run {run_id} is {run.status}; its export exists "
+                "only once the treasurer releases it"
+            )
+        try:
+            return self.pipeline.objects.get(run.export_key)
+        except KeyError:
+            raise PaymentRunError(
+                f"export artifact {run.export_key} for run {run_id} is "
+                "missing from the object store"
+            ) from None

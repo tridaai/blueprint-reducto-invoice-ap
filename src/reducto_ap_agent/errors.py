@@ -62,6 +62,16 @@ class ReconciliationError(ApError):
     status_code = 422
 
 
+class PaymentRunError(ApError):
+    """A payment run could not be assembled or released as asked
+    — no eligible records, a member whose supplier is not on
+    file at release time, run totals that do not tie. Per-record
+    ineligibility is NOT an error: it rides the run as a named
+    refusal. This is for the batch as a whole failing loudly."""
+
+    status_code = 422
+
+
 class InjectionScreened(ApError):
     """Document text carried an instruction-like payload; the
     affected fields were fenced before any model call. Raised only
