@@ -74,6 +74,7 @@ from .payments import (
     export_digest,
     export_key_for,
 )
+from .position import build_position, export_key_for_position, position_csv
 from .reconciliation import reconcile_statement
 from .schemas import (
     ControllerDecision,
@@ -82,6 +83,7 @@ from .schemas import (
     PaymentLine,
     PaymentPacket,
     PaymentRun,
+    PositionReport,
     Reconciliation,
     TreasurerDecision,
     UnappliedCredit,
@@ -382,6 +384,30 @@ class ApService:
             totals_by_currency=totals,
             generated_at=_now(),
         )
+
+    # -- the position ----------------------------------------------------
+
+    def ap_position(self, as_of: str) -> PositionReport:
+        """The AP position at close, aged as of ``as_of`` (an ISO
+        date): every payable by supplier, bucketed by days past
+        its due date, split by the state of its money, and tied
+        to the packet's open total in the same pass (position.py
+        states the construction). A read over the store —
+        building it writes nothing and moves no money."""
+        return build_position(self.store.list(), as_of)
+
+    def position_export(self, as_of: str) -> tuple[str, str, bytes]:
+        """The position CSV, written to the object store in the
+        export idiom: a versioned key, the SHA-256 of the bytes
+        returned beside them so a caller can record the digest
+        of exactly what was filed. Returns (key, digest, bytes).
+        Rendering is deterministic — the same store state at the
+        same as-of renders the same bytes."""
+        report = self.ap_position(as_of)
+        data = position_csv(report)
+        key = export_key_for_position(report.as_of)
+        self.pipeline.objects.put(key, data, "text/csv")
+        return key, export_digest(data), data
 
     # -- payment runs ----------------------------------------------
 

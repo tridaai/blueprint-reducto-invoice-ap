@@ -229,6 +229,31 @@ def run_demo() -> ApService:
     print("  The credit stays on file, unapplied, with its reason on the "
           "packet — next cycle's business, settled against the supplier's "
           "future invoices. It does not rewrite a released run.")
+
+    print("\nAnd at the close — the AP position as of 2026-11-15, aged off "
+          "due dates, tied to the packet in the same pass:")
+    position = service.ap_position("2026-11-15")
+    for supplier in position.suppliers:
+        buckets = " · ".join(
+            f"{name} {amount:.2f}"
+            for name, amount in supplier.bucket_totals.items() if amount)
+        print(f"  {supplier.supplier_name:<28} {supplier.currency} "
+              f"open {supplier.open_total:>9.2f}  ({buckets})")
+    for tie in position.ties:
+        verdict = "TIED" if tie.tied else "POSITION_TIE_BREAK"
+        print(f"  {tie.currency}: packet {tie.packet_total:.2f} · position "
+              f"{tie.position_total:.2f} — {verdict}")
+    for currency, states in position.state_totals_by_currency.items():
+        print(f"  {currency} by state: " + " · ".join(
+            f"{name} {amount:.2f}" for name, amount in states.items()))
+    for held in position.fraud_held:
+        print(f"  FRAUD-HELD {held.invoice_number} ({held.supplier_name}) "
+              f"{held.currency} {held.open:.2f} — outside the tie, "
+              "disclosed, not buried")
+    for covered in position.fully_credited:
+        print(f"  FULLY CREDITED {covered.invoice_number} "
+              f"({covered.supplier_name}) face {covered.face:.2f} — "
+              "credits brought it to 0.00; it owes nothing and ages nothing")
     return service
 
 

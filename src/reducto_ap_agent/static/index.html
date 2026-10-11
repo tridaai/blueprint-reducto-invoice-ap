@@ -147,6 +147,19 @@
     <div id="confirm-list"></div>
   </section>
 </div>
+<div style="padding: 0 28px 8px;">
+  <section>
+    <h2>AP position at close</h2>
+    <p class="note" style="margin-top:0;">What we owe, to whom, and how old it is — aged off due dates as of the stated date, split by the state of the money (free, in a run, paid-proposed), and tied to the packet's open total in the same pass. Fraud-held money is disclosed beside the position, outside the tie. An invoice with no due date on record is UNDATED — shown, never silently bucketed.</p>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <input id="position-as-of" type="date" value="2026-11-15">
+      <button id="load-position" class="secondary">Age the position</button>
+      <a id="position-export" href="/position/export?as_of=2026-11-15">Download CSV</a>
+      <span class="note" id="position-tie"></span>
+    </div>
+    <div id="position" class="note" style="margin-top:8px;">No position loaded yet.</div>
+  </section>
+</div>
 <footer>
   <img src="/favicon.svg" alt="Trida AI">
   <span>Trida AI — Blueprint: Reducto Invoice AP, deployed in-VPC</span>
@@ -222,6 +235,33 @@ async function loadRecords() {
         await loadRecords();
       } catch (e) { $("cr-error-" + id).textContent = e.message; }
     }));
+}
+
+async function loadPosition() {
+  const asOf = $("position-as-of").value || "2026-11-15";
+  $("position-export").href = "/position/export?as_of=" + asOf;
+  const p = await api("/position?as_of=" + asOf);
+  const bucketNames = ["CURRENT", "1-30", "31-60", "61-90", "90+", "UNDATED"];
+  let html = p.suppliers.length ? p.suppliers.map(s => {
+    const buckets = bucketNames.filter(n => s.bucket_totals[n])
+      .map(n => `${n} ${money(s.bucket_totals[n])}`).join(" · ");
+    const states = ["OPEN_FREE", "IN_RUN", "PAID_PROPOSED"].filter(n => s.state_totals[n])
+      .map(n => `${n} ${money(s.state_totals[n])}`).join(" · ");
+    const lines = s.lines.map(l => `<div class="note" style="margin-left:14px;">${l.invoice_number} · due ${l.due_date || "—"} · ${l.bucket}${l.days_past_due === null ? "" : " (" + l.days_past_due + "d)"} · ${l.state} · face ${money(l.face)} − credits ${money(l.credits)} = <strong>${money(l.open)}</strong></div>`).join("");
+    return `<details><summary>${s.supplier_name} · ${s.currency} <strong>${money(s.open_total)}</strong> <span class="note">${buckets}${states ? " · " + states : ""}</span></summary>${lines}</details>`;
+  }).join("") : "No approved payables — the position is empty.";
+  if (p.fraud_held.length)
+    html += `<div style="margin-top:8px;">Fraud-held (outside the tie): ` + p.fraud_held.map(h =>
+      `${h.invoice_number} · ${h.supplier_name} · <strong>${h.currency} ${money(h.open)}</strong> <span class="note">${h.fraud_flags.join("; ")}</span>`).join(" · ") + `</div>`;
+  if (p.fully_credited.length)
+    html += `<div class="note" style="margin-top:6px;">Fully credited (open 0.00): ` + p.fully_credited.map(f =>
+      `${f.invoice_number} · face ${money(f.face)} − credits ${money(f.credits)}`).join(" · ") + `</div>`;
+  if (p.anomalies.length)
+    html += `<p class="flag" style="margin-top:6px;">` + p.anomalies.map(a =>
+      `${a.code}: ${a.invoice_number} open ${money(a.open)}`).join(" · ") + `</p>`;
+  $("position").innerHTML = html;
+  $("position-tie").textContent = p.ties.map(t =>
+    `${t.currency}: packet ${money(t.packet_total)} · position ${money(t.position_total)} — ${t.tied ? "TIED" : "POSITION_TIE_BREAK"}`).join(" · ");
 }
 
 async function showRecord(id) {
@@ -473,10 +513,11 @@ $("create-run").addEventListener("click", async () => {
   } catch (e) { $("run-error").textContent = e.message; }
 });
 
-$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); });
-$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); });
+$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); });
+$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); });
+$("load-position").addEventListener("click", async () => { await loadPosition(); });
 $("status-filter").addEventListener("change", loadRecords);
-readiness(); loadRecords(); loadRecons(); loadRuns(); loadConfirmations();
+readiness(); loadRecords(); loadRecons(); loadRuns(); loadConfirmations(); loadPosition();
 </script>
 </body>
 </html>

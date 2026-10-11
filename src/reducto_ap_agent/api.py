@@ -14,6 +14,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -220,6 +221,31 @@ def create_app(service: ApService | None = None) -> FastAPI:
     @app.get("/payments/packet")
     def payment_packet() -> dict:
         return svc().payment_packet().model_dump()
+
+    @app.get("/position")
+    def ap_position(as_of: str | None = None) -> dict:
+        # The as-of is explicit — ageing against a hidden wall
+        # clock could not be reproduced at audit. It defaults to
+        # today only as a convenience; the report always states
+        # the date it was aged at.
+        return svc().ap_position(
+            as_of or datetime.now(timezone.utc).date().isoformat()
+        ).model_dump()
+
+    @app.get("/position/export")
+    def position_export(as_of: str | None = None) -> Response:
+        as_of = as_of or datetime.now(timezone.utc).date().isoformat()
+        key, digest, data = svc().position_export(as_of)
+        return Response(
+            content=data,
+            media_type="text/csv",
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="ap-position-{as_of}.csv"',
+                "X-Export-Key": key,
+                "X-Export-Sha256": digest,
+            },
+        )
 
     @app.post("/payments/runs", status_code=201)
     def create_payment_run(request: PaymentRunRequest) -> dict:

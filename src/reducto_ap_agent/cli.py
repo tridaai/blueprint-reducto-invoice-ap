@@ -63,6 +63,10 @@ def main(argv: list[str] | None = None) -> int:
     p_confirm = sub.add_parser("confirm", help="reconcile one remittance advice against the payment run it answers")
     p_confirm.add_argument("record_id")
     sub.add_parser("confirmations", help="list remittance confirmations as JSON")
+    p_position = sub.add_parser("position", help="print the AP position aged as of a date (JSON), tied to the packet")
+    p_position.add_argument("as_of", help="the close date, YYYY-MM-DD — ageing is explicit, never a hidden today")
+    p_position.add_argument("--export", action="store_true",
+                            help="also write the position CSV to the object store and print its key + SHA-256")
     args = parser.parse_args(argv)
 
     service = build_service()
@@ -126,6 +130,11 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(
                 [c.model_dump() for c in service.list_confirmations()], indent=2
             ))
+        elif args.command == "position":
+            if args.export:
+                key, digest, _ = service.position_export(args.as_of)
+                print(f"export: {key}  sha256 {digest}")
+            print(service.ap_position(args.as_of).model_dump_json(indent=2))
     except ApError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
