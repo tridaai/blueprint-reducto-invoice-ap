@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reducto Invoice AP — Trida Blueprint Console</title>
+<link rel="icon" href="/favicon.svg">
+<style>
+  :root {
+    --indigo: #4F46E5;
+    --ink: #0A0A0A;
+    --muted: #5b5b66;
+    --line: #e6e6ee;
+    --bg: #ffffff;
+    --panel: #f7f7fb;
+    --ok: #177245;
+    --warn: #9a6a00;
+    --bad: #b3261e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 18px 28px; border-bottom: 1px solid var(--line);
+  }
+  header img { height: 34px; }
+  header h1 { font-size: 19px; margin: 0; font-weight: 800; letter-spacing: -0.01em; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .pill {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    border: 1px solid var(--line); font-size: 12px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.06em; background: #fff;
+  }
+  .pill.indigo { background: var(--indigo); color: #fff; border-color: var(--indigo); }
+  main { padding: 22px 28px 8px; display: grid; grid-template-columns: 1.5fr 1fr; gap: 22px; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; background: #fff; border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  tr.row { cursor: pointer; }
+  tr.row:hover { background: #eef0fe; }
+  .status { font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .st-APPROVED, .st-MATCHED { color: var(--ok); }
+  .st-AWAITING_APPROVER { color: var(--indigo); }
+  .st-EXCEPTION, .st-TOTAL_MISMATCH { color: var(--warn); }
+  .st-FRAUD_REVIEW, .st-REFUSED, .st-REJECTED { color: var(--bad); }
+  button {
+    background: var(--indigo); color: #fff; border: 0; border-radius: 999px;
+    padding: 8px 16px; font-weight: 700; cursor: pointer; font-size: 13.5px;
+  }
+  button.secondary { background: #fff; color: var(--indigo); border: 1px solid var(--indigo); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  input, select { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13.5px; }
+  .kv { display: grid; grid-template-columns: 130px 1fr; gap: 4px 10px; font-size: 13.5px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; }
+  .cite { color: var(--muted); font-size: 12px; }
+  .flag { color: var(--bad); font-weight: 600; font-size: 13px; }
+  .note { color: var(--muted); font-size: 13px; }
+  footer {
+    display: flex; align-items: center; gap: 18px;
+    padding: 18px 28px 26px; color: var(--muted); font-size: 13.5px;
+  }
+  footer img { height: 24px; }
+  footer a { color: var(--indigo); text-decoration: none; font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <img src="/favicon.svg" alt="Trida AI">
+  <div>
+    <h1>Reducto Invoice AP, deployed in-VPC</h1>
+    <div class="sub">Trida AI blueprint console — documents in, three-way match in code, a named approver at the gate. Nothing here pays anyone.</div>
+  </div>
+  <span style="flex:1"></span>
+  <span class="pill indigo" id="profile-pill">profile …</span>
+  <span class="pill" id="backend-pill">backend …</span>
+</header>
+<main>
+  <section>
+    <h2>Records</h2>
+    <div style="margin-bottom:12px; display:flex; gap:8px;">
+      <button id="seed">Load the demo world</button>
+      <button class="secondary" id="refresh">Refresh</button>
+      <select id="status-filter">
+        <option value="">All statuses</option>
+        <option>AWAITING_APPROVER</option><option>APPROVED</option><option>REJECTED</option>
+        <option>EXCEPTION</option><option>FRAUD_REVIEW</option><option>REFUSED</option><option>RECEIVED</option>
+      </select>
+    </div>
+    <table>
+      <thead><tr><th>Record</th><th>Class</th><th>Supplier</th><th>Invoice</th><th>Total</th><th>Match</th><th>Status</th></tr></thead>
+      <tbody id="records-body"><tr><td colspan="7" class="note">No records yet — load the demo world.</td></tr></tbody>
+    </table>
+    <h2 style="margin-top:20px;">Proposed payment packet</h2>
+    <div id="packet" class="note">Approvals will appear here as a proposed packet. It executes nothing.</div>
+  </section>
+  <section>
+    <h2>Record detail</h2>
+    <div id="detail" class="note">Select a record to see its extraction, citations, match, and gate.</div>
+  </section>
+</main>
+<footer>
+  <img src="/favicon.svg" alt="Trida AI">
+  <span>Trida AI — Blueprint: Reducto Invoice AP, deployed in-VPC</span>
+  <a href="https://trida.ai" target="_blank" rel="noopener">Visit Trida AI →</a>
+  <a href="https://trida.ai/blog?category=blueprints" target="_blank" rel="noopener">View all blueprints →</a>
+</footer>
+<script>
+const $ = (id) => document.getElementById(id);
+let current = null;
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+  return res.json();
+}
+
+async function readiness() {
+  try {
+    const r = await api("/readiness");
+    $("profile-pill").textContent = "profile: " + r.deployment_profile;
+    $("backend-pill").textContent = "engine: " + r.document_backend;
+  } catch (e) { /* header pills stay as-is */ }
+}
+
+function money(v) { return v === null || v === undefined ? "—" : Number(v).toFixed(2); }
+
+async function loadRecords() {
+  const status = $("status-filter").value;
+  const records = await api("/records" + (status ? "?status=" + status : ""));
+  const body = $("records-body");
+  if (!records.length) {
+    body.innerHTML = '<tr><td colspan="7" class="note">No records.</td></tr>';
+  } else {
+    body.innerHTML = records.map(r => {
+      const total = r.extraction ? r.extraction.fields.total?.value : null;
+      const inv = r.extraction ? r.extraction.fields.invoice_number?.value : "";
+      const match = r.match ? r.match.status : "—";
+      return `<tr class="row" data-id="${r.record_id}">
+        <td>${r.record_id}</td><td>${r.doc_class}</td><td>${r.supplier_name || "—"}</td>
+        <td>${inv || "—"}</td><td>${money(total)}</td>
+        <td>${match}</td><td class="status st-${r.status}">${r.status}</td></tr>`;
+    }).join("");
+    body.querySelectorAll("tr.row").forEach(tr =>
+      tr.addEventListener("click", () => showRecord(tr.dataset.id)));
+  }
+  const packet = await api("/payments/packet");
+  $("packet").innerHTML = packet.lines.length
+    ? packet.lines.map(l => `<div>${l.supplier_name} · ${l.invoice_number} · <strong>${l.currency} ${money(l.amount)}</strong></div>`).join("")
+      + `<div class="note" style="margin-top:6px;">${packet.note}</div>`
+    : "No approved records yet — the packet is empty.";
+}
+
+async function showRecord(id) {
+  const r = await api("/records/" + id);
+  current = r;
+  let html = `<dl class="kv">
+    <dt>Record</dt><dd>${r.record_id}</dd>
+    <dt>Status</dt><dd class="status st-${r.status}">${r.status}</dd>
+    <dt>Class</dt><dd>${r.doc_class}</dd>
+    <dt>Supplier</dt><dd>${r.supplier_name || "—"}</dd></dl>`;
+  if (r.refusal_reason) html += `<p class="flag">${r.refusal_reason}</p>`;
+  (r.fraud_flags || []).forEach(f => html += `<p class="flag">⚠ ${f}</p>`);
+  (r.injection_flags || []).forEach(f => html += `<p class="flag">⚠ injection screen: ${f}</p>`);
+  if (r.extraction) {
+    html += `<h2 style="margin-top:14px;">Extracted fields</h2><dl class="kv">`;
+    for (const [name, field] of Object.entries(r.extraction.fields)) {
+      const cite = field.citation ? `<span class="cite">p.${field.citation.page} · box [${field.citation.bbox.map(n => Math.round(n)).join(", ")}] · ${field.citation.source}</span>` : `<span class="cite">no citation</span>`;
+      html += `<dt>${name}</dt><dd>${field.value ?? "—"} ${cite}</dd>`;
+    }
+    html += `</dl>`;
+    if (r.extraction.lines.length)
+      html += `<p class="note">${r.extraction.lines.length} line items extracted.</p>`;
+  }
+  if (r.match) {
+    html += `<h2 style="margin-top:14px;">Three-way match — ${r.match.status}</h2>`;
+    if (r.match.exception_codes.length)
+      html += `<p class="flag">${r.match.exception_codes.join(", ")}</p>`;
+    (r.match.notes || []).forEach(n => html += `<p class="note">${n}</p>`);
+    if (r.match.line_matches.length)
+      html += `<table><thead><tr><th>SKU</th><th>Verdict</th><th>Inv qty</th><th>Recv qty</th><th>PO price</th><th>Inv price</th></tr></thead><tbody>`
+        + r.match.line_matches.map(l => `<tr><td>${l.sku}</td><td>${l.verdict}</td><td>${l.invoiced_qty}</td><td>${l.received_qty}</td><td>${money(l.po_unit_price)}</td><td>${money(l.invoice_unit_price)}</td></tr>`).join("")
+        + `</tbody></table>`;
+  }
+  if (r.decision)
+    html += `<p class="note" style="margin-top:10px;">Gate: ${r.decision.decision} by ${r.decision.actor}${r.decision.reason ? " — " + r.decision.reason : ""}</p>`;
+  if (r.status === "AWAITING_APPROVER") {
+    html += `<div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap;">
+      <input id="actor" placeholder="Approver name (required)">
+      <input id="reason" placeholder="Reason (optional)">
+      <button id="approve">Approve</button>
+      <button class="secondary" id="reject">Reject</button></div>
+      <p class="note" id="gate-error"></p>`;
+  }
+  $("detail").innerHTML = html;
+  if (r.status === "AWAITING_APPROVER") {
+    const decide = async (decision) => {
+      try {
+        await api(`/records/${r.record_id}/decision`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({decision, actor: $("actor").value, reason: $("reason").value}),
+        });
+        await loadRecords(); await showRecord(r.record_id);
+      } catch (e) { $("gate-error").textContent = e.message; }
+    };
+    $("approve").addEventListener("click", () => decide("approve"));
+    $("reject").addEventListener("click", () => decide("reject"));
+  }
+}
+
+$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); });
+$("refresh").addEventListener("click", loadRecords);
+$("status-filter").addEventListener("change", loadRecords);
+readiness(); loadRecords();
+</script>
+</body>
+</html>

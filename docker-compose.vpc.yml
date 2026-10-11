@@ -1,0 +1,49 @@
+# VPC profile overlay: everything inside the boundary.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.vpc.yml up --build
+#
+# What changes vs the cloud stack — topology and endpoint, nothing
+# else (the same image, pipeline, and guardrails run in both):
+#
+# - The api is wired DEPLOYMENT_PROFILE=vpc, DOCUMENT_BACKEND=
+#   reducto, and the Reducto adapter talks to the internal engine
+#   endpoint http://reducto-engine:8080.
+# - The engine service publishes NO port. It is reachable only on
+#   the compose network, by the api. Document traffic — bytes in,
+#   extractions out — never crosses the stack's boundary.
+#
+# The engine service in this demo stack is the blueprint's
+# labelled stand-in (the offline text-layer adapter behind the
+# Reducto API shape — see reducto_ap_agent/engine_api.py). A
+# customer deployment replaces it with their licensed self-hosted
+# engine at the same endpoint; nothing else in the stack changes.
+
+services:
+  api:
+    environment:
+      DEPLOYMENT_PROFILE: vpc
+      DOCUMENT_BACKEND: reducto
+      # The stand-in engine does not check keys; a licensed engine
+      # gets its real key here, from the deployment's secrets.
+      REDUCTO_API_KEY: ${REDUCTO_API_KEY:-vpc-demo-key}
+      REDUCTO_BASE_URL: http://reducto-engine:8080
+    depends_on:
+      reducto-engine:
+        condition: service_healthy
+
+  reducto-engine:
+    build:
+      context: .
+    # No `ports:` — internal only, by design. `expose` documents
+    # the port for the compose network; nothing reaches the host.
+    expose:
+      - "8080"
+    environment:
+      ENGINE_PORT: "8080"
+    command: ["reducto-ap-engine"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped

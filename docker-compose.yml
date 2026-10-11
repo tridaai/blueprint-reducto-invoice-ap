@@ -1,0 +1,91 @@
+# Production-shaped stack, CLOUD profile: the document engine is
+# Reducto's hosted API.
+#
+#   DOCUMENT_BACKEND=reducto REDUCTO_API_KEY=... docker compose up --build
+#
+# opens the console at http://localhost:8000. Records and graph
+# checkpoints live in PostgreSQL (db), document bytes in object
+# storage (minio). The api service is stateless; scale it by
+# adding replicas against the same db/minio.
+#
+# With no key set, the stack still runs: DOCUMENT_BACKEND
+# defaults to the labelled offline adapter so the workflow can be
+# exercised end to end. For the deployment this blueprint is
+# about — everything inside the customer's boundary — use the
+# VPC overlay instead:  docker compose -f docker-compose.yml \
+#                         -f docker-compose.vpc.yml up --build
+#
+# Credentials below are local-stack defaults for this reference
+# stack, overridable via the environment. A real deployment
+# injects them from a secrets manager and puts TLS in front of
+# every hop — see "What a production deploy still needs" in
+# docs/architecture.md.
+
+services:
+  api:
+    build:
+      context: .
+    ports:
+      - "8000:8000"
+    environment:
+      DEPLOYMENT_PROFILE: ${DEPLOYMENT_PROFILE:-cloud}
+      DOCUMENT_BACKEND: ${DOCUMENT_BACKEND:-offline}
+      REDUCTO_API_KEY: ${REDUCTO_API_KEY:-}
+      DATABASE_URL: <redacted>
+      S3_ENDPOINT_URL: http://minio:8333
+      S3_BUCKET: ap-documents
+      S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    depends_on:
+      db:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: reductoap
+      POSTGRES_PASSWORD: <redacted>
+      POSTGRES_DB: reductoap
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reductoap -d reductoap"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # S3-compatible object storage for document bytes. MinIO Inc.
+  # locked public pulls of minio/minio behind a login/license in
+  # 2025, so this runs SeaweedFS's S3 gateway instead — same
+  # path-style PUT/GET/HEAD API this app's S3 client needs.
+  # Service name stays `minio` so S3_ENDPOINT_URL above doesn't
+  # need to change; only the port (9000 -> 8333) does.
+  minio:
+    image: chrislusf/seaweedfs:latest
+    command: server -s3 -dir=/data -ip=0.0.0.0
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8333/"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  minio-init:
+    # One-shot: create the documents bucket, then exit. SeaweedFS's
+    # S3 gateway doesn't enforce SigV4 auth in this unconfigured
+    # mode, so a plain unsigned PUT is enough (no mc / MinIO CLI
+    # needed).
+    image: curlimages/curl:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["sh", "-c", "code=$$(curl -s -o /dev/null -w '%{http_code}' -X PUT http://minio:8333/ap-documents); case $$code in 200|204|409) exit 0 ;; *) echo \"bucket create failed: HTTP $$code\" >&2; exit 1 ;; esac"]
+
+volumes:
+  pgdata:
+  miniodata:
