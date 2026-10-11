@@ -56,6 +56,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="comma-separated record ids (default: every approved payable record)")
     p_run.add_argument("--currencies", default=None,
                        help="comma-separated currency scope (default: all)")
+    p_run.add_argument("--amounts", default=None,
+                       help="comma-separated record_id=amount part payments "
+                            "(default: every member at its whole open amount)")
     sub.add_parser("payment-runs", help="list payment runs as JSON")
     p_decide_run = sub.add_parser("decide-run", help="the treasurer's word on a payment run")
     p_decide_run.add_argument("run_id")
@@ -121,8 +124,15 @@ def main(argv: list[str] | None = None) -> int:
                 [c.strip() for c in args.currencies.split(",") if c.strip()]
                 if args.currencies else None
             )
+            amounts = None
+            if args.amounts:
+                amounts = {}
+                for pair in args.amounts.split(","):
+                    record_id, _, value = pair.partition("=")
+                    amounts[record_id.strip()] = float(value.strip())
             run = service.create_payment_run(
-                args.value_date, record_ids=record_ids, currencies=currencies
+                args.value_date, record_ids=record_ids,
+                currencies=currencies, amounts=amounts,
             )
             print(run.model_dump_json(indent=2))
         elif args.command == "payment-runs":

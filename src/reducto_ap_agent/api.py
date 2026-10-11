@@ -57,6 +57,7 @@ class PaymentRunRequest(BaseModel):
     value_date: str
     record_ids: list[str] | None = None  # None = every approved payable record
     currencies: list[str] | None = None  # None/empty = all currencies
+    amounts: dict[str, float] | None = None  # per-record part amounts
 
 
 class TreasurerDecisionRequest(BaseModel):
@@ -276,6 +277,7 @@ def create_app(service: ApService | None = None) -> FastAPI:
             request.value_date,
             record_ids=request.record_ids,
             currencies=request.currencies,
+            amounts=request.amounts,
         )
         return run.model_dump()
 

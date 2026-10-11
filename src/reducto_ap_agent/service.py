@@ -70,6 +70,7 @@ from .credits import (
     credit_amount,
     credited_invoice_number,
     open_amount,
+    paid_amount,
     resolve_target,
     unapplied_reason,
 )
@@ -98,6 +99,7 @@ from .schemas import (
     DocumentRecord,
     DuplicateHoldResolution,
     PaymentConfirmation,
+    PaymentEntry,
     PaymentLine,
     PaymentPacket,
     PaymentRun,
@@ -505,6 +507,7 @@ class ApService:
                     float(record.extraction.value("total") or 0.0), 2
                 ),
                 credits_applied=list(record.credits_applied),
+                payments_applied=list(record.payments_applied),
             ))
             totals[currency] = round(totals.get(currency, 0.0) + amount, 2)
         unapplied: list[UnappliedCredit] = []
@@ -608,6 +611,7 @@ class ApService:
         value_date: str,
         record_ids: list[str] | None = None,
         currencies: list[str] | None = None,
+        amounts: dict[str, float] | None = None,
     ) -> PaymentRun:
         """Assemble a payment run and hold its members.
 
@@ -618,7 +622,10 @@ class ApService:
         (a mistyped id must never silently shrink a batch);
         zero eligible records fails the assembly outright.
         Members are marked IN_RUN on their records, so a second
-        assembly can only refuse them by name.
+        assembly can only refuse them by name. ``amounts``
+        names the part each member joins at, per record id;
+        members it does not name join at their whole open
+        amount.
         """
         if not value_date or not value_date.strip():
             raise PaymentRunError("a payment run needs a value date")
@@ -638,7 +645,7 @@ class ApService:
             ]
         run = assemble_run(
             self._next_run_id(value_date), value_date, candidates,
-            currencies=currencies, created_at=_now(),
+            currencies=currencies, amounts=amounts, created_at=_now(),
         )
         for line in run.lines:
             record = self.get_record(line.record_id)
@@ -647,7 +654,10 @@ class ApService:
             record.audit.append({
                 "event": "payment_run_joined", "at": _now(),
                 "detail": f"member of payment run {run.run_id} "
-                          f"(value date {run.value_date})",
+                          f"(value date {run.value_date})"
+                          + (f" at a part of {line.amount:.2f} of its "
+                             f"open {line.open_amount:.2f}"
+                             if line.amount != line.open_amount else ""),
             })
             record.updated_at = _now()
             self.store.save(record)
@@ -668,9 +678,14 @@ class ApService:
         """The treasurer's word: release the batch, or return
         it for rework. Release generates the bank-instruction
         export first — if the export cannot be built (a member
-        supplier not on file), nothing mutates — then locks
-        every member as PAID_PROPOSED. Return frees every
-        member to join a later run. The records' APPROVED
+        supplier not on file), nothing mutates — then records
+        each member's instructed part on its payments ledger
+        and stands the member at its new state: PAID_PROPOSED
+        when this release completes the invoice, PART_PAID
+        with the remainder still open when it does not. Return
+        frees every member to join a later run — a member with
+        payments already released goes back to standing
+        PART_PAID, never to unpaid. The records' APPROVED
         status — the approver's decision — is never touched:
         the run is a proposal state layered over it."""
         if action not in ("release", "return"):
@@ -715,20 +730,53 @@ class ApService:
         for line in run.lines:
             record = self.get_record(line.record_id)
             if action == "release":
-                record.payment_state = "PAID_PROPOSED"
-                record.audit.append({
-                    "event": "payment_run_paid_proposed", "at": _now(),
-                    "detail": f"released in payment run {run.run_id}; the "
-                              "export proposes this payment — nothing has "
-                              "been paid by this system",
-                })
+                record.payments_applied.append(PaymentEntry(
+                    run_id=run.run_id, amount=line.amount,
+                    currency=line.currency, actor=actor, at=_now(),
+                ))
+                remaining = open_amount(record)
+                if remaining == 0:
+                    record.payment_state = "PAID_PROPOSED"
+                    record.audit.append({
+                        "event": "payment_run_paid_proposed", "at": _now(),
+                        "detail": f"released in payment run {run.run_id}; the "
+                                  "export proposes this payment — nothing has "
+                                  "been paid by this system",
+                    })
+                else:
+                    record.payment_state = "PART_PAID"
+                    record.audit.append({
+                        "event": "payment_run_part_paid", "at": _now(),
+                        "detail": f"released in payment run {run.run_id} at "
+                                  f"{line.amount:.2f}; "
+                                  f"{paid_amount(record):.2f} now instructed "
+                                  f"across released runs and {remaining:.2f} "
+                                  "still open — the export proposes this "
+                                  "part payment; nothing has been paid by "
+                                  "this system",
+                    })
             else:
-                record.payment_run_id = None
-                record.payment_state = None
+                if record.payments_applied:
+                    record.payment_state = "PART_PAID"
+                    record.payment_run_id = \
+                        record.payments_applied[-1].run_id
+                    freed_detail = (
+                        f"payment run {run.run_id} was returned by "
+                        f"{actor}; the invoice stands part-paid — "
+                        f"{paid_amount(record):.2f} instructed across "
+                        f"released runs, {open_amount(record):.2f} open "
+                        "for a later run"
+                    )
+                else:
+                    record.payment_run_id = None
+                    record.payment_state = None
+                    freed_detail = (
+                        f"payment run {run.run_id} was returned by "
+                        f"{actor}; free to join a later run"
+                    )
                 record.audit.append({
                     "event": "payment_run_freed", "at": _now(),
-                    "detail": f"payment run {run.run_id} was returned by "
-                              f"{actor}; free to join a later run",
+                    "detail": freed_detail,
                 })
             record.updated_at = _now()
             self.store.save(record)

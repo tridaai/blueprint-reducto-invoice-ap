@@ -163,14 +163,19 @@ class GateDecision(BaseModel):
 
 
 # A record's payment-run membership. ``IN_RUN``: held by an open
-# run awaiting the treasurer. ``PAID_PROPOSED``: the run was
-# released — the record sits in a bank-instruction export as a
-# proposal. Terminal: a paid-proposed record never joins another
-# run. This is deliberately NOT a RecordStatus: the record stays
+# run awaiting the treasurer. ``PAID_PROPOSED``: released runs
+# have instructed the record's whole open amount — it sits in
+# bank-instruction exports as a proposal, fully committed.
+# Terminal: a paid-proposed record never joins another run.
+# ``PART_PAID``: released runs have instructed part of the open
+# amount; the remainder is still owed and may join a later run.
+# A part-paid record that joins one reads IN_RUN again while
+# held, and returns to PART_PAID if the run is returned. This
+# is deliberately NOT a RecordStatus: the record stays
 # APPROVED, because the approver's decision and the treasurer's
 # batch are two different humans' acts and neither rewrites the
 # other.
-PaymentState = Literal["IN_RUN", "PAID_PROPOSED"]
+PaymentState = Literal["IN_RUN", "PAID_PROPOSED", "PART_PAID"]
 
 # A member record's remittance-confirmation state: what the
 # bank's advice said about this member when its run was last
@@ -212,6 +217,28 @@ class CreditApplication(BaseModel):
     at: str = ""
 
 
+class PaymentEntry(BaseModel):
+    """One released instruction against one invoice: the part
+    of it a payment run's export told the customer's payment
+    systems to pay, recorded on the invoice when the treasurer
+    released that run. ``amount`` is positive — the instructed
+    part — and the invoice's open payable falls by exactly
+    this much. The entry lives on the INVOICE's ledger
+    (``payments_applied``) beside the credit applications,
+    because that is where the money question is asked: what is
+    still owed on this invoice. The run's own line stays the
+    instruction's primary record; this entry is the invoice's
+    view of the same act, written in the same step, at the
+    line's amount — the two cannot disagree without one of
+    them having been written outside the release path."""
+
+    run_id: str
+    amount: float
+    currency: str = "USD"
+    actor: str  # the treasurer who released the run
+    at: str = ""
+
+
 class DuplicateHoldResolution(BaseModel):
     """A named controller's word on a paid-duplicate hold.
     ``CONFIRMED_DUPLICATE``: the arrival is the paid invoice
@@ -235,23 +262,24 @@ class PaidDuplicateHold(BaseModel):
     (duplicates.py): this invoice-class document states the
     number of an invoice that was already released for payment,
     at an amount that is that invoice's paid story — its face,
-    or the net figure a released run actually instructed after
-    credits were applied (``amount_basis`` names which).
+    or the total the released runs actually instructed for it
+    across every part payment (``amount_basis`` names which).
 
     The evidence names the payment, never just the twin: the
-    original record, the run that released it, who released it
-    and when, and the amount the export instructed
-    (``amount_paid`` — the run line, not a recomputation). The
-    hold is a state of THIS record; the original record and
-    its run are never written by the watch."""
+    original record, the run that paid it most recently, who
+    released it and when, and the amount the exports instructed
+    (``amount_paid`` — what the released runs instructed in
+    total, not a recomputation). The hold is a state of THIS
+    record; the original record and its runs are never
+    written by the watch."""
 
     original_record_id: str
     invoice_number: str  # the number as this arrival states it
     supplier_name: str = ""
-    payment_run_id: str
+    payment_run_id: str  # the most recent run that paid the original
     released_at: str = ""
     released_by: str = ""
-    amount_paid: float = 0.0  # the run line's instructed (net) amount
+    amount_paid: float = 0.0  # cumulative instructed across released runs
     paid_face_amount: float = 0.0  # the original's approved face
     currency: str = "USD"
     arrived_amount: float = 0.0  # this arrival's stated total
@@ -291,6 +319,14 @@ class DocumentRecord(BaseModel):
     credit_state: CreditState | None = None
     credits_applied: list[CreditApplication] = Field(default_factory=list)
     applied_invoice_record_id: str | None = None
+    # Released payment instructions against this invoice
+    # (payments.py): one entry per released run that took a
+    # part of it, at that run's line amount. Written only by
+    # the release path. The OPEN amount — face minus the
+    # credits above minus this ledger — is the derived figure
+    # the packet, the runs, the position, and the ledger all
+    # read (credits.py computes it; the paid total beside it).
+    payments_applied: list[PaymentEntry] = Field(default_factory=list)
     # The paid-duplicate watch (duplicates.py). Set at intake
     # when an invoice-class arrival answers to an invoice that
     # was already released for payment, at that invoice's face
@@ -373,12 +409,13 @@ class Reconciliation(BaseModel):
 class PaymentLine(BaseModel):
     """One proposed payment: an approved invoice at its OPEN
     amount — the approved face (``gross_amount``) minus the
-    credits applied against it, which ride the line so the
+    credits applied against it and the payments already
+    released against it, both ledgers riding the line so the
     reader sees why the figure differs from the invoice's
-    face. A fully credited invoice appears at 0.00 with its
-    credits listed: the packet is the AP position, and a known
-    invoice silently vanishing from it would hide exactly the
-    fact the credits explain."""
+    face. A fully credited or fully paid invoice appears at
+    0.00 with its ledgers listed: the packet is the AP
+    position, and a known invoice silently vanishing from it
+    would hide exactly the fact the ledgers explain."""
 
     record_id: str
     supplier_name: str
@@ -387,6 +424,7 @@ class PaymentLine(BaseModel):
     amount: float  # the open amount — what would actually be paid
     gross_amount: float = 0.0  # the approved face, before credits
     credits_applied: list[CreditApplication] = Field(default_factory=list)
+    payments_applied: list[PaymentEntry] = Field(default_factory=list)
 
 
 class UnappliedCredit(BaseModel):
@@ -419,17 +457,20 @@ class PaymentPacket(BaseModel):
 
 
 PositionBucket = Literal["CURRENT", "1-30", "31-60", "61-90", "90+", "UNDATED"]
-PositionState = Literal["OPEN_FREE", "IN_RUN", "PAID_PROPOSED"]
+PositionState = Literal["OPEN_FREE", "IN_RUN", "PAID_PROPOSED", "PART_PAID"]
 TieStatus = Literal["TIED", "POSITION_TIE_BREAK"]
 
 
 class PositionLine(BaseModel):
     """One payable in the AP position (position.py): an APPROVED
     invoice with a positive OPEN amount, aged off its due date.
-    ``state`` is where the money stands — free, held by an open
-    run, or released as PAID_PROPOSED — a second dimension over
-    the same open figure, so the state split and the ageing
-    split are two readings of one total and must agree."""
+    ``state`` is where the open money stands — free, held by an
+    open run, or part paid with the remainder still owed — a
+    second dimension over the same open figure, so the state
+    split and the ageing split are two readings of one total
+    and must agree. ``paid`` is the cumulative amount released
+    runs have already instructed against this invoice: a memo
+    figure beside the open amount, never part of it."""
 
     record_id: str
     supplier_id: str | None = None
@@ -438,6 +479,7 @@ class PositionLine(BaseModel):
     currency: str = "USD"
     face: float = 0.0
     credits: float = 0.0  # applied credits against the face
+    paid: float = 0.0  # cumulative released against this invoice
     open: float = 0.0
     invoice_date: str = ""
     due_date: str = ""  # "" when the record carries none → UNDATED
@@ -461,16 +503,19 @@ class SupplierPosition(BaseModel):
     state_totals: dict[str, float] = Field(default_factory=dict)
     face_total: float = 0.0
     credits_total: float = 0.0
+    paid_total: float = 0.0  # paid cumulative over the row's aged lines
     open_total: float = 0.0
 
 
 class PositionAnomaly(BaseModel):
     """A record the position cannot age and will not hide: an
-    APPROVED invoice whose applied-credit ledger exceeds its
-    face, so its open amount is negative. Application refuses
-    over-credit in code (credits.py), so this state is only
-    reachable by a corrupted record — the position names it,
-    keeps it out of the buckets, and lets it break the tie."""
+    APPROVED invoice whose applied ledgers (credits, and any
+    payments recorded against it) exceed its face, so its open
+    amount is negative. Application refuses over-credit and
+    run assembly refuses an over-committed part in code, so
+    this state is only reachable by a corrupted record — the
+    position names it, keeps it out of the buckets, and lets
+    it break the tie."""
 
     record_id: str
     supplier_name: str = ""
@@ -478,6 +523,7 @@ class PositionAnomaly(BaseModel):
     currency: str = "USD"
     face: float = 0.0
     credits: float = 0.0
+    paid: float = 0.0
     open: float = 0.0
     code: str = "NEGATIVE_OPEN"
     detail: str = ""
@@ -511,6 +557,24 @@ class FullyCreditedLine(BaseModel):
     credits: float = 0.0
 
 
+class FullyPaidLine(BaseModel):
+    """An APPROVED invoice whose released payments (with any
+    credits) bring its open amount to exactly zero. It owes
+    nothing and ages nothing; it is listed so the close can
+    see the payment happened — the counterpart of the fully
+    credited line, for money that left by instruction instead
+    of by netting. ``paid`` is the cumulative the released
+    runs instructed, in one part or several."""
+
+    record_id: str
+    supplier_name: str = ""
+    invoice_number: str = ""
+    currency: str = "USD"
+    face: float = 0.0
+    credits: float = 0.0
+    paid: float = 0.0
+
+
 class CurrencyTie(BaseModel):
     """The tie-out for one currency: the packet's open total
     against the position's aged total, and the difference when
@@ -540,11 +604,13 @@ class PositionReport(BaseModel):
     state_totals_by_currency: dict[str, dict[str, float]] = Field(
         default_factory=dict)
     open_totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    paid_totals_by_currency: dict[str, float] = Field(default_factory=dict)
     ties: list[CurrencyTie] = Field(default_factory=list)
     tie_status: TieStatus = "TIED"
     fraud_held: list[FraudHeldLine] = Field(default_factory=list)
     fraud_held_totals_by_currency: dict[str, float] = Field(default_factory=dict)
     fully_credited: list[FullyCreditedLine] = Field(default_factory=list)
+    fully_paid: list[FullyPaidLine] = Field(default_factory=list)
     anomalies: list[PositionAnomaly] = Field(default_factory=list)
     splits_agree: bool = True  # bucket split and state split both foot to the open totals
     note: str = (
@@ -557,13 +623,19 @@ RunStatus = Literal["AWAITING_TREASURER", "RELEASED", "RETURNED"]
 
 
 class PaymentRunLine(BaseModel):
-    """One member of a payment run: an approved invoice at its
-    OPEN amount — the approved face (``gross_amount``) minus
-    the credits applied against it, listed on the line so the
-    treasurer sees why the figure that will leave the bank
-    differs from the invoice's face. Credit notes are never
-    members: a credit is applied against an invoice, not paid
-    as a negative instruction (credits.py states the rule)."""
+    """One member of a payment run: an approved invoice at the
+    amount this run will instruct — its OPEN amount
+    (``open_amount``: the approved face ``gross_amount`` minus
+    the credits applied against it and the payments already
+    released), or a stated part of it when the treasurer's
+    batch pays the invoice in parts. The credits ride the line
+    so the treasurer sees why the figure that will leave the
+    bank differs from the invoice's face. Credit notes are
+    never members: a credit is applied against an invoice, not
+    paid as a negative instruction (credits.py states the
+    rule). The line is the instructed truth: once assembled it
+    is never recomputed, and on release the invoice's paid
+    ledger grows by exactly ``amount``."""
 
     record_id: str
     supplier_id: str | None = None
@@ -571,7 +643,8 @@ class PaymentRunLine(BaseModel):
     invoice_number: str = ""
     doc_class: DocClass = "invoice"
     currency: str = "USD"
-    amount: float = 0.0  # the open (net) amount — what the export instructs
+    amount: float = 0.0  # the instructed amount — what the export instructs
+    open_amount: float = 0.0  # the invoice's full open amount at assembly
     gross_amount: float = 0.0  # the approved face, before credits
     credits_applied: list[CreditApplication] = Field(default_factory=list)
 
@@ -673,6 +746,8 @@ class LedgerInvoice(BaseModel):
     face: float = 0.0
     credits_applied: list[CreditApplication] = Field(default_factory=list)
     credits_total: float = 0.0
+    payments_applied: list[PaymentEntry] = Field(default_factory=list)
+    paid_total: float = 0.0
     open: float = 0.0
     match_status: str | None = None
     exception_codes: list[str] = Field(default_factory=list)
@@ -759,6 +834,7 @@ class LedgerCurrencyTotals(BaseModel):
     approved_invoices: int = 0
     face_total: float = 0.0
     credits_total: float = 0.0
+    paid_total: float = 0.0
     open_total: float = 0.0
     position_open_total: float = 0.0
     difference: float = 0.0  # ledger open − position open

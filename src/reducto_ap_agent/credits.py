@@ -32,7 +32,9 @@ to the invoice it reduces, so this module owns the attachment:
 - **The approved amount never changes.** The invoice's
   extraction total is history — the approver approved that
   figure. What changes is the derived OPEN amount: face minus
-  the ledger. The packet and the payment runs read the open
+  the credit ledger minus the payments already released
+  against it (payments.py records those on the invoice at
+  release). The packet and the payment runs read the open
   amount; the export instructs it. One amount rule, computed
   here, reused everywhere — the way the packet's amounts were
   reused by the runs before.
@@ -57,6 +59,14 @@ to the invoice it reduces, so this module owns the attachment:
   business, settled against the supplier's future invoices;
   carrying a supplier credit balance forward is a ledger this
   blueprint deliberately does not build.
+- **A part-paid invoice is a live target for its remainder.**
+  PART_PAID is not PAID_PROPOSED: part of the payable is
+  still open, and a credit reduces what is actually still
+  owed. It applies against the OPEN remainder — the same
+  derived figure — so a credit larger than the remainder is
+  OVER_CREDIT against the remainder's figures, never against
+  the face the supplier originally billed. The released part
+  is untouched: the credit reduces the future, not the past.
 """
 
 from __future__ import annotations
@@ -102,16 +112,28 @@ def credited_invoice_number(credit: DocumentRecord) -> str:
     return str(value).strip() if value else ""
 
 
+def paid_amount(record: DocumentRecord) -> float:
+    """What released runs have already instructed against an
+    invoice record: the sum of its payments ledger, written at
+    release from the runs' own lines (payments.py). Zero for
+    an invoice no released run has taken. This is the memo
+    figure beside the open amount — the paid half of the one
+    computation below."""
+    return _cents(sum(entry.amount for entry in record.payments_applied))
+
+
 def open_amount(record: DocumentRecord) -> float:
     """What is still owed on an invoice record: its approved
-    face minus the credits applied against it. The face is the
+    face minus the credits applied against it minus the
+    payments already released against it. The face is the
     extraction total and never moves; this is the one derived
-    figure the packet, the runs, and the export all read."""
+    figure the packet, the runs, the position, the ledger, and
+    the export all read."""
     if record.extraction is None:
         return 0.0
     face = float(record.extraction.value("total") or 0.0)
     applied = sum(entry.amount for entry in record.credits_applied)
-    return _cents(face - applied)
+    return _cents(face - applied - paid_amount(record))
 
 
 def _resolve_target(
@@ -246,6 +268,11 @@ def application_blocker(
             f"amount — return the run, or let it release, before "
             "applying a credit against it",
         )
+    # PART_PAID deliberately falls through: the invoice is not
+    # fully paid, so its remainder is a live target and the
+    # money check below judges the credit against that
+    # remainder — the released part is never the credit's
+    # business.
     if target.payment_state == "PAID_PROPOSED":
         return (
             "TARGET_PAID_PROPOSED",
@@ -258,12 +285,17 @@ def application_blocker(
     amount = credit_amount(credit)
     open_now = open_amount(target)
     if amount > open_now:
+        less = []
+        if target.credits_applied:
+            less.append("credits already applied")
+        if target.payments_applied:
+            less.append("payments already released")
         return (
             "OVER_CREDIT",
             f"credit of {amount:.2f} exceeds the open amount of "
             f"invoice {number} ({open_now:.2f}"
             + (f", face {float(target.extraction.value('total') or 0.0):.2f}"
-               f" less credits already applied" if target.credits_applied
+               f" less {' and '.join(less)}" if less
                else "")
             + ") — a credit never reduces a payable below zero, and "
             "it is never partially applied",

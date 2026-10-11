@@ -7,11 +7,20 @@ or return as a unit. Assembly is where the control lives:
 
 - a run takes only APPROVED invoices, each at its OPEN
   amount — the approved face minus the credits applied
-  against it (credits.py computes it; the packet reads the
-  same figure — one amount rule, reused, not reinvented).
-  A credit note is never a member: it is applied against the
-  invoice it names, not paid as a negative instruction, so
-  the netting holds whichever batch the invoice lands in.
+  against it and the payments already released (credits.py
+  computes it; the packet reads the same figure — one amount
+  rule, reused, not reinvented). A member may instead be
+  taken at a stated PART of its open amount: the line carries
+  the instructed part, the invoice's paid ledger grows by
+  exactly that part at release, and the remainder stays open
+  for a later run. A part must be positive and no more than
+  the open amount — the open amount already nets out every
+  earlier commitment, so a part that exceeds it would commit
+  the invoice beyond what is owed, and assembly refuses it
+  by name with the committed figure in the reason. A credit
+  note is never a member: it is applied against the invoice
+  it names, not paid as a negative instruction, so the
+  netting holds whichever batch the invoice lands in.
   An invoice whose credits bring it to zero is refused by
   name (FULLY_CREDITED) rather than silently dropped —
   there is nothing to pay, and the treasurer sees why;
@@ -47,7 +56,7 @@ import csv
 import hashlib
 import io
 
-from .credits import credited_invoice_number, open_amount
+from .credits import credited_invoice_number, open_amount, paid_amount
 from .errors import PaymentRunError
 from .schemas import (
     DocumentRecord,
@@ -77,12 +86,20 @@ EXPORT_COLUMNS = [
 ]
 
 
-def _refusal(record: DocumentRecord, currencies: list[str]) -> PaymentRefusal | None:
+def _refusal(
+    record: DocumentRecord,
+    currencies: list[str],
+    requested: float | None = None,
+) -> PaymentRefusal | None:
     """Why this record cannot join a run, or None when it can.
 
     Check order matters: the refusals a human acts on first
     (already committed elsewhere, held, excepted) are named
-    before the generic not-approved."""
+    before the generic not-approved, and the money checks —
+    a part payment's size — come last, once the record is
+    known to be an eligible member at all. ``requested`` is
+    the part the caller asked this run to instruct, or None
+    for the whole open amount."""
     rid = record.record_id
     if record.doc_class == "credit_note":
         # A credit note is refused as a member in its own words,
@@ -202,6 +219,42 @@ def _refusal(record: DocumentRecord, currencies: list[str]) -> PaymentRefusal | 
                 f"scope is {', '.join(currencies)}"
             ),
         )
+    if requested is not None:
+        # The money checks, last: the record is an eligible
+        # member, and only the size of its part can be wrong.
+        # The open amount already nets out every earlier
+        # commitment — credits applied and payments released —
+        # so judging the part against it IS judging the
+        # cumulative commitment, with the figures named.
+        part = round(float(requested), 2)
+        open_now = open_amount(record)
+        if part <= 0:
+            return PaymentRefusal(
+                record_id=rid, code="INVALID_PART_AMOUNT",
+                reason=(
+                    f"a part payment must be a positive amount — "
+                    f"{part:.2f} was requested against an open amount "
+                    f"of {open_now:.2f}"
+                ),
+            )
+        if part > open_now:
+            paid = paid_amount(record)
+            credits = round(
+                sum(e.amount for e in record.credits_applied), 2)
+            face = round(
+                float(record.extraction.value("total") or 0.0), 2
+            ) if record.extraction is not None else 0.0
+            return PaymentRefusal(
+                record_id=rid, code="PART_EXCEEDS_OPEN",
+                reason=(
+                    f"part payment of {part:.2f} exceeds the open "
+                    f"amount of {open_now:.2f} (face {face:.2f} less "
+                    f"credits {credits:.2f} less payments already "
+                    f"released {paid:.2f}) — {paid:.2f} is already "
+                    "committed across released runs, and a run may "
+                    "instruct at most the open remainder"
+                ),
+            )
     return None
 
 
@@ -211,24 +264,31 @@ def assemble_run(
     candidates: list[DocumentRecord],
     *,
     currencies: list[str] | None = None,
+    amounts: dict[str, float] | None = None,
     created_at: str = "",
 ) -> PaymentRun:
     """Assemble a run from candidate records.
 
     Pure computation over the candidates the caller selected
     (named ids, or the approved-payable universe): the service
-    persists the result and marks the members. Raises
-    :class:`PaymentRunError` when nothing is eligible — an
-    empty batch is an operator error, not a run."""
+    persists the result and marks the members. ``amounts``
+    names, per record id, the part this run will instruct;
+    a candidate it does not name joins at its whole open
+    amount. Raises :class:`PaymentRunError` when nothing is
+    eligible — an empty batch is an operator error, not a
+    run."""
     scope = [c.strip().upper() for c in (currencies or []) if c and c.strip()]
+    parts = amounts or {}
     lines: list[PaymentRunLine] = []
     refusals: list[PaymentRefusal] = []
     for record in candidates:
-        refusal = _refusal(record, scope)
+        requested = parts.get(record.record_id)
+        refusal = _refusal(record, scope, requested)
         if refusal is not None:
             refusals.append(refusal)
             continue
         assert record.extraction is not None  # approved records carry one
+        open_now = open_amount(record)
         lines.append(PaymentRunLine(
             record_id=record.record_id,
             supplier_id=record.supplier_id,
@@ -236,7 +296,11 @@ def assemble_run(
             invoice_number=str(record.extraction.value("invoice_number") or ""),
             doc_class=record.doc_class,  # type: ignore[arg-type]
             currency=record.extraction.currency,
-            amount=open_amount(record),
+            amount=(
+                open_now if requested is None
+                else round(float(requested), 2)
+            ),
+            open_amount=open_now,
             gross_amount=round(
                 float(record.extraction.value("total") or 0.0), 2
             ),
