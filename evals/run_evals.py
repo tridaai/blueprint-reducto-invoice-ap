@@ -26,6 +26,14 @@ Gates (a failure exits non-zero):
   and on release locks them as paid-proposed behind an export
   that is byte-stable and carries only the supplier master's
   bank details.
+- remittance confirmation — the bank's answer to a released
+  run classifies line by line (one member exact, one short,
+  one over, one missing, one line for an invoice the run
+  never contained), the summary ties to the run's totals,
+  advices naming no run or a run not on file are held
+  UNMATCHED with their reasons, and a full confirmation
+  cycle leaves the run, its export, and its members'
+  approvals byte-identical.
 
 Reported, not gated: per-field extraction accuracy, review-queue
 precision. A live run (EVAL_LIVE=1, DOCUMENT_BACKEND=reducto,
@@ -43,7 +51,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from reducto_ap_agent.datasets import build_world  # noqa: E402
+from reducto_ap_agent.datasets import build_world, remittance_advice_doc  # noqa: E402
 from reducto_ap_agent.graph import ApPipeline  # noqa: E402
 from reducto_ap_agent.object_store import InMemoryObjectStore  # noqa: E402
 from reducto_ap_agent.offline_docs import OfflineDocumentAdapter  # noqa: E402
@@ -277,6 +285,110 @@ def evaluate(service: ApService) -> dict:
         "paid_proposed_refused_forever": proposed_refused,
     }
 
+    # -- remittance confirmation scenario ------------------------
+    # A fresh released run, then the bank's answer to it: one
+    # member paid exactly, one short, one over, one never
+    # answered for, and one line for an invoice the run never
+    # contained. The confirmation's summary must tie to the
+    # run's total, and the whole cycle — reconcile plus the
+    # controller's accept — must leave the run, its export,
+    # and its members' approvals exactly as released.
+    conf_members = [
+        "REC-SUB-002-0",  # INV-1002, USD 1010.00 → exact
+        "REC-SUB-010-0",  # INV-1010, USD 600.00  → short 50.00
+        "REC-SUB-014-0",  # INV-1014, USD 300.00  → over 25.00
+        "REC-SUB-018-0",  # INV-2002, USD 400.00  → no line: missing
+    ]
+    for record_id in conf_members:
+        service.decide(record_id, "approve", "Eval Approver", "eval: matched")
+    conf_run = service.create_payment_run(
+        "2026-10-30", record_ids=list(conf_members)
+    )
+    service.decide_payment_run(
+        conf_run.run_id, "release", "Eval Treasurer", "eval: batch reviewed"
+    )
+    conf_run = service.get_payment_run(conf_run.run_id)
+    export_before = service.payment_run_export(conf_run.run_id)
+    member_before = {
+        rid: (
+            service.get_record(rid).status,
+            service.get_record(rid).decision,
+            service.get_record(rid).payment_state,
+        )
+        for rid in conf_members
+    }
+    advice_text = remittance_advice_doc(conf_run.run_id, [
+        ("INV-1002", 1010.00, "USD", "2026-10-30", "BNK-EVAL-01"),
+        ("INV-1010", 550.00, "USD", "2026-10-30", "BNK-EVAL-02"),
+        ("INV-1014", 325.00, "USD", "2026-10-30", "BNK-EVAL-03"),
+        ("INV-9999", 123.00, "USD", "2026-10-30", "BNK-EVAL-04"),
+    ])
+    (advice_record,) = service.submit(
+        "SUB-EVAL-CONF", "sub-eval-conf.pdf",
+        advice_text.encode("utf-8"), "text/plain",
+    )
+    conf = service.confirm_remittance(advice_record.record_id)
+    classes = {line.invoice_number: line.classification for line in conf.lines}
+    classes_exact = (
+        conf.status == "AWAITING_CONTROLLER"
+        and classes == {
+            "INV-1002": "paid_as_proposed",
+            "INV-1010": "short_paid",
+            "INV-1014": "over_paid",
+            "INV-2002": "missing",
+            "INV-9999": "unexpected_line",
+        }
+        and service.get_record("REC-SUB-002-0").payment_confirmation == "CONFIRMED"
+        and service.get_record("REC-SUB-010-0").payment_confirmation == "SHORT_PAID"
+        and service.get_record("REC-SUB-014-0").payment_confirmation == "OVER_PAID"
+        and service.get_record("REC-SUB-018-0").payment_confirmation == "MISSING"
+    )
+    (conf_totals,) = conf.totals
+    summary_ties = (
+        conf.totals_tie
+        and conf_totals.run_total == 2310.00
+        and conf_totals.confirmed_paid == 1010.00
+        and conf_totals.shortfall == 50.00
+        and conf_totals.excess == 25.00
+        and conf_totals.missing_proposed == 400.00
+        and conf_totals.unexpected_paid == 123.00
+    )
+    decided = service.decide_confirmation(
+        conf.confirmation_id, "accept", "Eval Controller", "eval: breaks noted"
+    )
+    conf_run_after = service.get_payment_run(conf_run.run_id)
+    member_after = {
+        rid: (
+            service.get_record(rid).status,
+            service.get_record(rid).decision,
+            service.get_record(rid).payment_state,
+        )
+        for rid in conf_members
+    }
+    run_and_export_untouched = (
+        decided.status == "ACCEPTED"
+        and service.payment_run_export(conf_run.run_id) == export_before
+        and conf_run_after.decision == conf_run.decision
+        and conf_run_after.export_digest == conf_run.export_digest
+        and member_after == member_before
+    )
+    unmatched_no_run = service.confirm_remittance("REC-SUB-022-0")
+    unmatched_unknown = service.confirm_remittance("REC-SUB-023-0")
+    unmatched_held = (
+        unmatched_no_run.status == "UNMATCHED"
+        and unmatched_no_run.run_id is None
+        and "names no payment run" in unmatched_no_run.unmatched_reason
+        and unmatched_unknown.status == "UNMATCHED"
+        and "RUN-2099-01-99" in unmatched_unknown.unmatched_reason
+        and "not on file" in unmatched_unknown.unmatched_reason
+    )
+    confirmation_results = {
+        "classes_exact": classes_exact,
+        "summary_ties": summary_ties,
+        "unmatched_held": unmatched_held,
+        "run_and_export_untouched": run_and_export_untouched,
+    }
+
     total_cases = len(cases)
     passed = sum(1 for c in cases if c["passed"])
     results = {
@@ -296,6 +408,7 @@ def evaluate(service: ApService) -> dict:
         ),
         "statement_reconciliation": statement_results,
         "payment_runs": payment_run_results,
+        "remittance_confirmation": confirmation_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
@@ -319,6 +432,11 @@ def evaluate(service: ApService) -> dict:
             and payment_run_results["export_byte_stable_and_digested"]
             and payment_run_results["paid_proposed_refused_forever"]
         ),
+        "confirmation_classes_exact": confirmation_results["classes_exact"],
+        "confirmation_summary_ties": confirmation_results["summary_ties"],
+        "confirmation_unmatched_held": confirmation_results["unmatched_held"],
+        "confirmation_leaves_run_and_export_untouched":
+            confirmation_results["run_and_export_untouched"],
     }
     results["gate_passed"] = all(results["gates"].values())
     return results

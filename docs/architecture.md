@@ -111,8 +111,10 @@ intake → process → gate (interrupt) → apply
   as RECEIVED, never extracted for payment; non-payable classes
   are REFUSED with the reason on the record — a statement first
   has its open-item lines extracted and captured on the record,
-  because reconciliation (below) reads them; payable documents
-  are extracted, screened (bank details), matched, and checked
+  because reconciliation (below) reads them, and a remittance
+  advice likewise has its paid lines captured, because
+  confirmation (below) reads them; payable documents are
+  extracted, screened (bank details), matched, and checked
   for duplicates against live records. Terminal states from
   this node: `RECEIVED`, `REFUSED`, `FRAUD_REVIEW`,
   `EXCEPTION`, or `AWAITING_APPROVER`.
@@ -347,15 +349,129 @@ panel (members, refusals, totals, gate controls, export
 download), and the CLI's `create-run` / `payment-runs` /
 `decide-run` / `export-run` commands.
 
+## Remittance confirmation
+
+The run section ended with an honest gap: a released run is a
+proposal, and nothing in it says what the bank actually did.
+Remittance confirmation closes that loop. A bank advice is a
+document like any other here — it arrives through the
+DocumentPort, is classified `remittance_advice`, and the
+pipeline captures its extraction on its record before filing
+it (the same intake pattern statements use), so confirmation
+works from records. The record itself stays `RECEIVED`: an
+advice is an attachment, never payable, never an instruction.
+`confirmations.py` holds the comparison; the service
+orchestrates run resolution, persistence, overlays, and the
+gate; migration `0004` gives confirmations their own table in
+the same JSONB idiom.
+
+**Run resolution.** An advice is tied to a run only by a
+reference the advice itself carries: its header's
+payment-run field, or one run named unanimously by its paid
+lines. Three failures are held `UNMATCHED` on the
+confirmation record, with the reason named: the advice names
+no run; it names a run that is not on file; or it names a run
+the treasurer has not released (only a released run has
+proposed payments that could have left the bank). An
+unmatched advice is never guessed onto a run and cannot be
+decided — there is nothing for a controller to accept until
+it answers a run. The confirmation id follows the service's
+established idiom, `CONF-<advice record id>` with numeric
+suffixes on repeat confirmations of the same advice, so a
+corrected advice can be confirmed again against the same run
+without overwriting the first answer.
+
+**The exact-match rule.** Confirmation compares paid against
+proposed with exact equality (rounded to cents, then equal),
+and deliberately never calls the match policy's tolerance
+helpers in `matching.py`/`policy.py`. The tolerances exist
+because the three-way match compares *documents* — a supplier's
+invoice against AP's order — and documents carry reading
+noise. A confirmation compares *money*: the amount on the
+released instruction against the amount the bank reports
+having moved. A one-cent shortfall inside a 1% tolerance is
+still a one-cent loss nobody would ever look at, so the rule
+is stated in the module that enforces it: money that left
+either matches the instruction to the cent, or the difference
+is a classified break with both figures on the line.
+
+**Classification.** Each advice line is read in advice order;
+members are keyed by invoice number. One line classifies one
+member: `paid_as_proposed` (paid equals proposed, same
+currency), `short_paid` (less arrived; `difference` carries
+paid − proposed), `over_paid` (more arrived). A member whose
+line reports another currency is `short_paid` with a null
+difference and the shortfall set to the full proposal —
+nothing arrived in the currency that was proposed — while the
+foreign figure rides its line and stays out of the paid
+totals. A second line for an already-classified member, and
+any line naming a non-member, is `unexpected_line`: shown,
+counted, and never absorbed — its money accumulates only
+into the summary's `unexpected_paid`. Members no line names
+are `missing`, appended in run order.
+
+**The summary tie.** Per currency, the proposed side of the
+classes partitions the run: confirmed + short + over +
+missing proposed must recompose the run's total for that
+currency, recomputed in the confirmation module *from the
+run's own member lines* — not from the classes — so a
+classification bug cannot make its own arithmetic look
+right. If the tie fails, the confirmation carries the flag
+`CONFIRMATION_ARITHMETIC_BREAK` and names it in its notes
+rather than smoothing the numbers.
+
+**The overlay.** A classified member gains
+`payment_confirmation` (`CONFIRMED` / `SHORT_PAID` /
+`OVER_PAID` / `MISSING`) and `payment_confirmation_id` on its
+record, beside `payment_state`, with a
+`payment_confirmation_recorded` audit event. It is an
+overlay, not a state: the record stays `APPROVED` and
+`PAID_PROPOSED`, because three different facts are now on
+record — what the approver decided, what the treasurer
+proposed, and what the bank answered — and none of them
+rewrites another. When several confirmations classify the
+same member (a corrected advice re-confirmed), the latest
+computed confirmation owns the overlay; each confirmation
+record itself is immutable in content once written.
+
+**Evidence discipline.** Computing or deciding a confirmation
+writes its own record and the member overlays — and nothing
+else. The run's payload, its decision, its export bytes and
+digest, the members' approvals and memberships, bank data,
+and supplier masters are all untouched; the eval pack pins
+the export bytes and the run's decision byte-identical
+across a full cycle. No advice line can create, alter, or
+release a payment: confirmation is the bank's answer being
+*read*, never acted on by this system.
+
+**The controller gate.** A matched confirmation ends
+`AWAITING_CONTROLLER` — the same gate shape as statement
+reconciliation, with the same `ControllerDecision`: a named
+controller accepts it, or flags it back with a note (required
+— the AP team takes it to the bank); decisions are audited
+and final. Flagging back does not edit the confirmation; the
+breaks stay on record exactly as classified, and the note
+says what happens next.
+
+Surfaces: `POST /remittances/{record_id}/confirm`,
+`GET /confirmations[?run_id=]`, `GET /confirmations/{id}`,
+`POST /confirmations/{id}/decision`, the console's
+remittance-confirmation panel (advices with their named run,
+per-run lines with proposed beside paid, the summary,
+controller controls), and the CLI's `confirm` /
+`confirmations` commands.
+
 ## Data services
 
 - **PostgreSQL** — the `records` table (one JSONB payload per
   record, status and supplier promoted to columns for the
   queries the console runs), the `reconciliations` table (same
-  pattern, migration `0002`), the `payment_runs` table (same
-  pattern again, migration `0003`), and the LangGraph Postgres
-  checkpointer. Numbered migrations in `migrations/` run at
-  startup; both stores share the one database.
+  pattern, migration `0002`), the `payment_runs` table
+  (migration `0003`), the `confirmations` table (migration
+  `0004`, run id nullable — held-unmatched advices have none),
+  and the LangGraph Postgres checkpointer. Numbered migrations
+  in `migrations/` run at startup; both stores share the one
+  database.
 - **Object storage** — document bytes behind `ObjectStorePort`;
   boto3 against any S3-compatible endpoint (SeaweedFS's S3
   gateway in compose; AWS S3 in a cloud deployment).

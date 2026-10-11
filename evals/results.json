@@ -1,7 +1,7 @@
 {
   "backend": "offline",
-  "cases": 22,
-  "passed": 22,
+  "cases": 24,
+  "passed": 24,
   "match_decision_accuracy": 1.0,
   "extraction_accuracy_by_field": {
     "invoice_number": 1.0,
@@ -42,6 +42,12 @@
     "release_locks_members": true,
     "paid_proposed_refused_forever": true
   },
+  "remittance_confirmation": {
+    "classes_exact": true,
+    "summary_ties": true,
+    "unmatched_held": true,
+    "run_and_export_untouched": true
+  },
   "failures": [],
   "gates": {
     "match_decision_accuracy == 1.0": true,
@@ -56,7 +62,11 @@
     "payment_run_member_named_with_holding_run": true,
     "payment_run_return_frees_members": true,
     "payment_run_export_master_details_only": true,
-    "payment_run_release_locks_and_export_stable": true
+    "payment_run_release_locks_and_export_stable": true,
+    "confirmation_classes_exact": true,
+    "confirmation_summary_ties": true,
+    "confirmation_unmatched_held": true,
+    "confirmation_leaves_run_and_export_untouched": true
   },
   "gate_passed": true
 }

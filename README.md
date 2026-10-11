@@ -220,6 +220,58 @@ the control:
   systems — `PAID_PROPOSED`, not paid. This system executes
   no payment, on any path.
 
+## Remittance confirmation
+
+`PAID_PROPOSED` says what the treasurer released. What the bank
+*did* comes back later, as a remittance advice — and
+confirmation is the discipline of answering it:
+
+- **The advice is read like any other document.** It arrives
+  through the same DocumentPort (classify → extract), its paid
+  lines captured on its record at intake — number, amount
+  paid, currency, value date, bank reference — and it stays an
+  attachment: an advice is never payable, and nothing in it
+  is an instruction.
+- **Tied to a run only by its own reference.** The advice's
+  header names the run it answers (or its lines do,
+  unanimously). An advice naming no run, a run that is not on
+  file, or a run the treasurer has not released is held
+  `UNMATCHED` with the reason on its confirmation record —
+  never guessed onto a run: attaching the bank's answer to
+  the wrong batch would corrupt two reconciliations at once.
+- **Exact, never within tolerance.** `confirmations.py`
+  compares paid against proposed with an equality, not the
+  match policy's tolerances. Tolerances exist to absorb
+  document-reading noise in the three-way match; money that
+  left the bank is not a document — a one-cent shortfall is
+  a break a human explains, not a tolerance case. Every
+  member lands in exactly one class: `paid_as_proposed`,
+  `short_paid` (both figures and the shortfall),
+  `over_paid`, `missing` (released, and no line answers for
+  it), or `unexpected_line` (the advice names an invoice
+  that was not in the run — shown, never absorbed; a line
+  that arrived in the wrong currency is short by the full
+  proposal, its figure riding the line in its own currency).
+- **A summary that ties, or names why not.** Counts and
+  totals per class and currency partition the run: confirmed
+  + short + over + missing recompose the run's total exactly,
+  recomputed from the run's own lines — or the confirmation
+  carries a named arithmetic break. Unexpected money is
+  reported beside the tie, never inside it.
+- **An overlay, never a rewrite.** The confirmation state
+  (`CONFIRMED`, `SHORT_PAID`, `OVER_PAID`, `MISSING`) lands
+  on each member record *beside* `PAID_PROPOSED`, under its
+  own field, with an audit event naming the confirmation.
+  The run, its decision, its export bytes, and every
+  approval are untouched — the eval pack pins them
+  byte-identical across a full cycle.
+- **The controller's gate.** A confirmation is a stored
+  record ending `AWAITING_CONTROLLER`, like a statement
+  reconciliation: a named controller accepts it, or flags
+  it back with a note the AP team takes to the bank. An
+  unmatched advice cannot be decided — there is nothing to
+  accept until it answers a run.
+
 ## Configuration
 
 Provider-first: the standard run is Reducto. Copy `.env.example`
@@ -286,6 +338,13 @@ gates on it:
   must free the members; and the released export must be
   byte-stable and carry only the supplier master's bank
   details.
+- **Remittance confirmation** — the bank's answer to a
+  released run must classify line by line (exact, short,
+  over, missing, one line the run never contained); the
+  summary must tie to the run's totals; advices naming no
+  run or a run not on file must be held unmatched with their
+  reasons; and the run, its export, and its members'
+  approvals must be byte-identical afterwards.
 
 Live-Reducto eval runs are opt-in (`EVAL_LIVE=1` with a key)
 and reported, not gated.
@@ -302,10 +361,11 @@ src/reducto_ap_agent/
   matching.py      the three-way match, in code
   reconciliation.py statement vs AP records, line by line, in code
   payments.py      run assembly, the refusals, the bank export, in code
+  confirmations.py remittance vs the released run, line by line, in code
   guardrails.py    bank-detail, payable, and injection screens
   policy.py        every tolerance, in one module
   graph.py         the LangGraph pipeline and its gate
-  service.py       submissions, both gates, the packet, payment runs
+  service.py       submissions, the gates, the packet, runs, confirmations
   store.py / db.py records in Postgres (or the in-memory double)
   datasets.py      the synthetic world — gold by construction
 migrations/        numbered SQL, applied at startup
