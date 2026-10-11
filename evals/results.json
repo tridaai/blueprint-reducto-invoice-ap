@@ -61,7 +61,7 @@
     "buckets_exact": true,
     "undated_named": true,
     "tie_holds": true,
-    "state_split_sums": true,
+    "state_split_sums": false,
     "tie_break_named": true
   },
   "supplier_ledger": {
@@ -76,6 +76,16 @@
     "net_basis_named": true,
     "boundaries_hold": true,
     "resolution_discipline": true
+  },
+  "partial_payments": {
+    "two_run_paydown_ties": true,
+    "overcommit_refused_with_figures": true,
+    "credit_lands_on_remainder": true,
+    "over_credit_judged_on_remainder": true,
+    "position_remainder_ages": true,
+    "readers_agree_at_the_end": true,
+    "confirmation_answers_the_part_line": true,
+    "watch_holds_on_cumulative_evidence": true
   },
   "failures": [],
   "gates": {
@@ -103,7 +113,7 @@
     "position_buckets_exact": true,
     "position_undated_named": true,
     "position_ties_to_packet": true,
-    "position_state_split_sums": true,
+    "position_state_split_sums": false,
     "position_tie_break_named": true,
     "ledger_totals_tie_to_position": true,
     "ledger_unmatched_listed_nowhere_else": true,
@@ -112,7 +122,12 @@
     "duplicate_watch_holds_the_paid_resend": true,
     "duplicate_watch_released_record_decidable": true,
     "duplicate_watch_net_basis_and_boundaries": true,
-    "duplicate_watch_resolution_discipline": true
+    "duplicate_watch_resolution_discipline": true,
+    "partial_payment_paydown_ties": true,
+    "partial_payment_overcommit_refused": true,
+    "partial_payment_credit_on_remainder": true,
+    "partial_payment_position_and_ledger_agree": true,
+    "partial_payment_confirmation_and_watch": true
   },
-  "gate_passed": true
+  "gate_passed": false
 }

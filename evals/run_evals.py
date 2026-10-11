@@ -60,16 +60,30 @@ Gates (a failure exits non-zero):
   both figures.
 - supplier ledger — one supplier's whole relationship as a
   read model over the main service's end state: Harborlight's
-  totals (face, credits, open) tie to its position row to the
-  cent, and every supplier's ledger ties; a stray invoice
-  from a supplier spelling the master has never seen lands
-  under Unmatched — counted, named as written, and present
-  on no supplier's ledger; Harborlight's story renders whole
-  (a fully credited invoice with its credit, a paid-proposed
-  member the bank answered MISSING, a waiting credit with its
-  reason, four open statement breaks); and the bank warning
-  is present exactly where a document disagreed with the
-  master — Granite Peak — and nowhere else.
+  totals (face, credits, paid, open) tie to its position to
+  the cent, with its two released invoices disclosed on the
+  position's fully-paid list, and every supplier's ledger
+  ties; a stray invoice from a supplier spelling the master
+  has never seen lands under Unmatched — counted, named as
+  written, and present on no supplier's ledger; Harborlight's
+  story renders whole (a fully credited invoice with its
+  credit, a paid-proposed member the bank answered MISSING, a
+  waiting credit with its reason, four open statement breaks);
+  and the bank warning is present exactly where a document
+  disagreed with the master — Granite Peak — and nowhere else.
+- partial payments — an invoice paid in parts across two
+  runs, on its own planted service: the first run takes
+  1200.00 of a 2000.00 face and the member stands PART_PAID;
+  a further 900.00 is refused as an overcommit with the
+  figures named; a 200.00 credit lands on the remainder and
+  a 900.00 credit is judged against the remainder, not the
+  face; the position ages only the 800.00 remainder with the
+  paid figure beside it; advices answer the part run's line
+  (the part confirms, the full face is an over-payment on
+  that run); the second run completes the paydown — 1200 +
+  600 = 2000 − 200 — with each export instructing only its
+  own part; and resends are held on the cumulative instructed
+  figure, 1200.00 after the first run and 1800.00 after both.
 - paid-duplicate watch — the duplicate that arrives second:
   on the main service, an invoice released in a run is
   re-submitted verbatim and held on the paid evidence (run,
@@ -102,6 +116,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from reducto_ap_agent.credits import open_amount  # noqa: E402
 from reducto_ap_agent.datasets import _doc, _inv_fields, build_world, remittance_advice_doc  # noqa: E402
 from reducto_ap_agent.errors import GateError  # noqa: E402
 from reducto_ap_agent.graph import ApPipeline  # noqa: E402
@@ -115,6 +130,7 @@ from reducto_ap_agent.schemas import (  # noqa: E402
     LineItem,
     PaymentRun,
     PaymentRunLine,
+    RemittanceLine,
     TreasurerDecision,
 )
 from reducto_ap_agent.service import ApService  # noqa: E402
@@ -603,17 +619,23 @@ def evaluate(service: ApService) -> dict:
     )
     harbor_ledger = service.supplier_ledger("SUP-08", "2026-11-15")
     ledger_index = service.supplier_index("2026-11-15")
-    position_rows = {
-        (row.supplier_id, row.currency): row
-        for row in service.ap_position("2026-11-15").suppliers
-    }
+    end_position = service.ap_position("2026-11-15")
     (harbor_usd,) = harbor_ledger.totals
+    # Harborlight's money is settled by the end state: INV-2001
+    # (900.00) and INV-2002 (400.00) were released in runs, so
+    # they read as PAID, not open — face 1500.00, credits
+    # 200.00 (CN-2003's cover), paid 1300.00, open 0.00. The
+    # position discloses them on its fully-paid list; nothing
+    # ages, and the ledger's open ties to the position's zero.
     ledger_ties = (
         harbor_ledger.tie_status == "TIED"
         and (harbor_usd.face_total, harbor_usd.credits_total,
-             harbor_usd.open_total) == (1500.00, 200.00, 1300.00)
-        and harbor_usd.position_open_total
-        == position_rows[("SUP-08", "USD")].open_total == 1300.00
+             harbor_usd.paid_total, harbor_usd.open_total)
+        == (1500.00, 200.00, 1300.00, 0.00)
+        and harbor_usd.position_open_total == 0.00
+        and {(f.invoice_number, f.paid) for f in end_position.fully_paid
+             if f.supplier_name == "Harborlight Marine Supply"}
+        == {("INV-2001", 900.00), ("INV-2002", 400.00)}
         and all(
             totals.tied
             for entry in ledger_index.suppliers
@@ -753,6 +775,7 @@ def evaluate(service: ApService) -> dict:
     state_split_sums = (
         position.state_totals_by_currency["USD"] == {
             "OPEN_FREE": 600.0, "IN_RUN": 400.0, "PAID_PROPOSED": 0.0,
+            "PART_PAID": 0.0,
         }
         and position.splits_agree
     )
@@ -955,6 +978,250 @@ def evaluate(service: ApService) -> dict:
         "resolution_discipline": resolution_discipline,
     }
 
+    # -- partial payments --------------------------------------
+    # Its own service and planted records (the position
+    # scenario's idiom), one invoice paid in parts end to end:
+    # INV-EV-P1 (face 2000.00) is taken at 1200.00 by a first
+    # run, a 200.00 credit lands on the 800.00 remainder, and a
+    # second run takes the 600.00 that is left — 1200 + 600 =
+    # 2000 − 200. Every reader must land on those figures.
+    part_service = build_offline_service()
+    s02 = world.supplier("SUP-02")
+
+    def plant_invoice(record_id, number, total):
+        part_service.store.save(DocumentRecord(
+            record_id=record_id, submission_id="SUB-EV-PART",
+            supplier_id="SUP-02", supplier_name=s02.name,
+            status="APPROVED", doc_class="invoice",
+            extraction=ExtractedDocument(
+                doc_class="invoice", currency="USD",
+                fields={
+                    "invoice_number": ExtractedField(value=number),
+                    "invoice_date": ExtractedField(value="2026-09-01"),
+                    "due_date": ExtractedField(value="2026-11-15"),
+                    "total": ExtractedField(value=total),
+                }),
+        ))
+
+    def plant_credit(record_id, number, total, credited):
+        part_service.store.save(DocumentRecord(
+            record_id=record_id, submission_id="SUB-EV-PART",
+            supplier_id="SUP-02", supplier_name=s02.name,
+            status="APPROVED", doc_class="credit_note",
+            credit_state="UNAPPLIED",
+            extraction=ExtractedDocument(
+                doc_class="credit_note", currency="USD",
+                fields={
+                    "invoice_number": ExtractedField(value=number),
+                    "total": ExtractedField(value=total),
+                    "credited_invoice_number": ExtractedField(
+                        value=credited),
+                }),
+        ))
+
+    def plant_advice(record_id, run_id, rows):
+        part_service.store.save(DocumentRecord(
+            record_id=record_id, submission_id="SUB-EV-PART",
+            supplier_id="SUP-02", supplier_name=s02.name,
+            status="APPROVED", doc_class="remittance_advice",
+            extraction=ExtractedDocument(
+                doc_class="remittance_advice", currency="USD",
+                fields={
+                    "payment_run_id": ExtractedField(value=run_id),
+                },
+                remittance_lines=[
+                    RemittanceLine(
+                        invoice_number=number, amount_paid=amount,
+                        currency="USD", value_date="2026-11-20",
+                        bank_reference=ref)
+                    for number, amount, ref in rows
+                ]),
+        ))
+
+    plant_invoice("REC-EV-P1", "INV-EV-P1", 2000.00)
+    plant_invoice("REC-EV-P2", "INV-EV-P2", 500.00)
+    plant_invoice("REC-EV-P3", "INV-EV-P3", 100.00)
+    plant_credit("REC-EV-PC1", "CN-EV-P1", -200.00, "INV-EV-P1")
+    plant_credit("REC-EV-PC2", "CN-EV-P2", -900.00, "INV-EV-P1")
+
+    part_run1 = part_service.create_payment_run(
+        "2026-11-20", record_ids=["REC-EV-P1", "REC-EV-P2"],
+        amounts={"REC-EV-P1": 1200.00})
+    part_lines = {l.record_id: l for l in part_run1.lines}
+    part_service.decide_payment_run(
+        part_run1.run_id, "release", "Eval Treasurer", "eval: first part")
+    p1_after_part = part_service.get_record("REC-EV-P1")
+    first_part_stands = (
+        part_lines["REC-EV-P1"].amount == 1200.00
+        and part_lines["REC-EV-P1"].open_amount == 2000.00
+        and part_lines["REC-EV-P2"].amount == 500.00
+        and part_run1.totals_by_currency == {"USD": 1700.00}
+        and p1_after_part.payment_state == "PART_PAID"
+        and [e.amount for e in p1_after_part.payments_applied] == [1200.00]
+        and part_service.get_record("REC-EV-P2").payment_state
+        == "PAID_PROPOSED"
+    )
+
+    mid_position = part_service.ap_position("2026-11-25")
+    (mid_row,) = [r for r in mid_position.suppliers
+                  if r.supplier_id == "SUP-02"]
+    (mid_line,) = [l for l in mid_row.lines
+                   if l.record_id == "REC-EV-P1"]
+    remainder_ages = (
+        mid_line.open == 800.00
+        and mid_line.paid == 1200.00
+        and mid_line.state == "PART_PAID"
+        and mid_line.bucket == "1-30"  # due 11-15, as of 11-25
+        and mid_position.paid_totals_by_currency["USD"] == 1700.00
+        and [f.invoice_number for f in mid_position.fully_paid]
+        == ["INV-EV-P2"]
+        and mid_position.tie_status == "TIED"
+        and mid_position.splits_agree
+    )
+
+    # A resend at the part figure, while only the part is paid:
+    # held on the cumulative evidence of one run.
+    def part_resend(submission_id: str, total: float):
+        text = _doc("INVOICE", 1, _inv_fields(
+            s02, "INV-EV-P1", "PO-6001", total), [
+            LineItem(sku="SKU-A1", description="Industrial valves",
+                     quantity=10, unit_price=120.00, amount=1200.00),
+            LineItem(sku="SKU-A2", description="Gasket sets",
+                     quantity=5, unit_price=40.00, amount=200.00),
+        ])
+        (record,) = part_service.submit(
+            submission_id, f"{submission_id.lower()}.pdf",
+            text.encode("utf-8"), "text/plain")
+        return record
+
+    part_resend_rec = part_resend("SUB-EV-PART-RESEND", 1200.00)
+    held_on_the_part = (
+        part_resend_rec.status == "PAID_DUPLICATE_HOLD"
+        and part_resend_rec.duplicate_hold.amount_basis == "NET"
+        and part_resend_rec.duplicate_hold.amount_paid == 1200.00
+        and part_resend_rec.duplicate_hold.payment_run_id
+        == part_run1.run_id
+    )
+
+    # The cumulative overcommit: 900.00 more against an 800.00
+    # remainder is refused by name, committed figure quoted.
+    greedy = part_service.create_payment_run(
+        "2026-11-27", record_ids=["REC-EV-P1", "REC-EV-P3"],
+        amounts={"REC-EV-P1": 900.00})
+    greedy_refusal = {r.record_id: r for r in greedy.refusals}["REC-EV-P1"]
+    overcommit_refused = (
+        greedy_refusal.code == "PART_EXCEEDS_OPEN"
+        and "900.00" in greedy_refusal.reason
+        and "800.00" in greedy_refusal.reason
+        and "1200.00" in greedy_refusal.reason
+        and [l.record_id for l in greedy.lines] == ["REC-EV-P3"]
+    )
+    part_service.decide_payment_run(
+        greedy.run_id, "return", "Eval Treasurer", "eval: reset")
+
+    # The credit lands on the remainder; the bigger one is
+    # judged against the remainder's figures, not the face.
+    part_service.apply_credit("REC-EV-PC1", "Eval Controller")
+    credit_on_remainder = (
+        open_amount(part_service.get_record("REC-EV-P1")) == 600.00
+    )
+    try:
+        part_service.apply_credit("REC-EV-PC2", "Eval Controller")
+        over_credit_message = ""
+    except GateError as exc:
+        over_credit_message = str(exc)
+    over_credit_on_remainder = (
+        over_credit_message.startswith("OVER_CREDIT")
+        and "900.00" in over_credit_message
+        and "600.00" in over_credit_message
+        and part_service.get_record("REC-EV-PC2").credit_state
+        == "UNAPPLIED"
+    )
+
+    # Confirmations answer the first run's line: the part
+    # confirms exactly; the full face is an over-payment break
+    # on that run and confirms nothing about the remainder.
+    plant_advice("REC-EV-ADV-P1", part_run1.run_id,
+                 [("INV-EV-P1", 1200.00, "BNK-EV-P1")])
+    part_conf = part_service.confirm_remittance("REC-EV-ADV-P1")
+    plant_advice("REC-EV-ADV-P2", part_run1.run_id,
+                 [("INV-EV-P1", 2000.00, "BNK-EV-P2")])
+    face_conf = part_service.confirm_remittance("REC-EV-ADV-P2")
+    part_classes = {l.invoice_number: l.classification
+                    for l in part_conf.lines}
+    face_classes = {l.invoice_number: l.classification
+                    for l in face_conf.lines}
+    confirmation_answers_the_line = (
+        part_classes["INV-EV-P1"] == "paid_as_proposed"
+        and face_classes["INV-EV-P1"] == "over_paid"
+        and open_amount(part_service.get_record("REC-EV-P1")) == 600.00
+    )
+
+    part_run2 = part_service.create_payment_run(
+        "2026-12-04", record_ids=["REC-EV-P1"],
+        amounts={"REC-EV-P1": 600.00})
+    part_service.decide_payment_run(
+        part_run2.run_id, "release", "Eval Treasurer", "eval: the rest")
+    p1_done = part_service.get_record("REC-EV-P1")
+    export1 = part_service.payment_run_export(part_run1.run_id).decode()
+    export2 = part_service.payment_run_export(part_run2.run_id).decode()
+    row1 = next(r for r in export1.splitlines() if "REC-EV-P1" in r)
+    row2 = next(r for r in export2.splitlines() if "REC-EV-P1" in r)
+    paydown_ties = (
+        first_part_stands
+        and p1_done.payment_state == "PAID_PROPOSED"
+        and [e.amount for e in p1_done.payments_applied]
+        == [1200.00, 600.00]
+        and open_amount(p1_done) == 0.00
+        and row1.rstrip().endswith(",1200.00")
+        and row2.rstrip().endswith(",600.00")
+    )
+
+    end_position = part_service.ap_position("2026-12-10")
+    end_ledger = part_service.supplier_ledger("SUP-02", "2026-12-10")
+    end_invoice = next(
+        i for i in end_ledger.invoices if i.record_id == "REC-EV-P1")
+    readers_agree = (
+        remainder_ages
+        and [(f.invoice_number, f.face, f.credits, f.paid)
+             for f in end_position.fully_paid
+             if f.record_id == "REC-EV-P1"]
+        == [("INV-EV-P1", 2000.00, 200.00, 1800.00)]
+        and end_position.paid_totals_by_currency["USD"] == 2300.00
+        and end_position.tie_status == "TIED"
+        and (end_invoice.face, end_invoice.credits_total,
+             end_invoice.paid_total, end_invoice.open)
+        == (2000.00, 200.00, 1800.00, 0.00)
+        and end_ledger.tie_status == "TIED"
+    )
+
+    # After both runs, the watch's evidence is the two runs
+    # summed, named by the most recent.
+    net_resend_rec = part_resend("SUB-EV-PART-RESEND-NET", 1800.00)
+    face_resend_rec = part_resend("SUB-EV-PART-RESEND-FACE", 2000.00)
+    watch_cumulative = (
+        held_on_the_part
+        and net_resend_rec.status == "PAID_DUPLICATE_HOLD"
+        and net_resend_rec.duplicate_hold.amount_basis == "NET"
+        and net_resend_rec.duplicate_hold.amount_paid == 1800.00
+        and net_resend_rec.duplicate_hold.payment_run_id
+        == part_run2.run_id
+        and face_resend_rec.status == "PAID_DUPLICATE_HOLD"
+        and face_resend_rec.duplicate_hold.amount_basis == "FACE"
+        and face_resend_rec.duplicate_hold.amount_paid == 1800.00
+    )
+    partial_results = {
+        "two_run_paydown_ties": paydown_ties,
+        "overcommit_refused_with_figures": overcommit_refused,
+        "credit_lands_on_remainder": credit_on_remainder,
+        "over_credit_judged_on_remainder": over_credit_on_remainder,
+        "position_remainder_ages": remainder_ages,
+        "readers_agree_at_the_end": readers_agree,
+        "confirmation_answers_the_part_line":
+            confirmation_answers_the_line,
+        "watch_holds_on_cumulative_evidence": watch_cumulative,
+    }
+
     total_cases = len(cases)
     passed = sum(1 for c in cases if c["passed"])
     results = {
@@ -979,6 +1246,7 @@ def evaluate(service: ApService) -> dict:
         "ap_position": position_results,
         "supplier_ledger": ledger_results,
         "paid_duplicate_watch": watch_results,
+        "partial_payments": partial_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
@@ -1035,6 +1303,22 @@ def evaluate(service: ApService) -> dict:
         ),
         "duplicate_watch_resolution_discipline":
             watch_results["resolution_discipline"],
+        "partial_payment_paydown_ties":
+            partial_results["two_run_paydown_ties"],
+        "partial_payment_overcommit_refused":
+            partial_results["overcommit_refused_with_figures"],
+        "partial_payment_credit_on_remainder": (
+            partial_results["credit_lands_on_remainder"]
+            and partial_results["over_credit_judged_on_remainder"]
+        ),
+        "partial_payment_position_and_ledger_agree": (
+            partial_results["position_remainder_ages"]
+            and partial_results["readers_agree_at_the_end"]
+        ),
+        "partial_payment_confirmation_and_watch": (
+            partial_results["confirmation_answers_the_part_line"]
+            and partial_results["watch_holds_on_cumulative_evidence"]
+        ),
     }
     results["gate_passed"] = all(results["gates"].values())
     return results
