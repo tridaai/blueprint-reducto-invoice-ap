@@ -262,12 +262,98 @@ the console's reconciliation panel (breaks itemised, the two
 figures side by side), and the CLI's `reconcile` command — all
 over the same service methods.
 
+## Payment runs
+
+The packet is a view; a payment run is a stored batch with a
+gate on it — the step an actual AP department takes between
+"approved" and "the bank file". `payments.py` holds the
+assembly arithmetic and the export; the service orchestrates
+persistence, membership, and the gate; migration `0003` gives
+runs their own table in the same JSONB idiom.
+
+**Assembly.** A run is created for a value date, optionally
+scoped to currencies, from named record ids (in the order
+named; an unknown id fails the whole assembly loudly — a
+mistyped id must never silently shrink a batch) or, unnamed,
+from every `APPROVED` invoice and credit note — the packet's
+universe. Each candidate is either a member or a named refusal:
+
+- `NOT_PAYABLE_CLASS` — not an invoice or credit note;
+- `FRAUD_HOLD` — on fraud review, with the record's flags in
+  the reason; fraud is cleared in the supplier master, never
+  by a batch;
+- `MATCH_EXCEPTION` — carries an open exception, codes named;
+- `NOT_APPROVED` — awaiting the gate, rejected, or otherwise
+  not finally approved;
+- `ALREADY_IN_RUN` — held by an open run, which is named;
+  a record belongs to at most one open run;
+- `ALREADY_PAID_PROPOSED` — released in an earlier run, also
+  named; this refusal is forever, because the record already
+  sits in a bank export;
+- `OUT_OF_CURRENCY_SCOPE` — outside the run's currency scope.
+
+Zero eligible records fails assembly (`PaymentRunError`, 422):
+an empty batch is an operator error, not a run. Member amounts
+are the packet's amounts — the extraction total, credit notes
+negative — and the per-currency totals are tied back against
+the member lines before the run is stored; a batch whose
+header disagrees with its contents is never written.
+
+**Membership, honestly named.** A member's record keeps its
+`APPROVED` status — that is the approver's decision, and the
+treasurer's batch does not rewrite another human's act.
+Membership rides the record as `payment_run_id` +
+`payment_state`: `IN_RUN` while held by an open run,
+`PAID_PROPOSED` once its run is released. *Paid-proposed*, not
+paid: the state names exactly what happened — a proposal for
+this payment exists in a released export. Both transitions are
+audit events on the record.
+
+**The treasurer gate.** `AWAITING_TREASURER` → `RELEASED` |
+`RETURNED`, decided by a named treasurer; returning requires
+a reason (the AP team reworks on it) and frees every member
+(membership cleared, audited) to join a later run. Release
+builds and stores the export *before* any state moves — a
+release that cannot produce its artifact has not happened.
+
+**The export.** A payment-instruction CSV with a fixed column
+set, generated once at release, stored under
+`payment-runs/{run_id}/payment-instructions-v1.csv` (the
+version is in the key: a future format is a new artifact,
+never an overwrite), and pinned on the run by SHA-256 digest.
+The download endpoint serves the stored bytes — never a
+recompute — so what the treasurer released is what anyone can
+ever retrieve. Bank name and account come from the **supplier
+master** (`ReferenceData`), never from the member record: the
+invoice's own bank field is a claim by the sender and the
+fraud pattern this blueprint screens for is precisely an
+invoice asking to be paid somewhere new. A member whose
+supplier is not on file fails the release loudly, before
+anything is written.
+
+**What it is not.** A released run changes nothing about
+execution: there is still no code path in this system that
+pays anyone. The export is handed to the customer's payment
+systems, where payment execution and its own controls live.
+The packet, likewise, is unchanged — it remains the naive read
+model over approvals; the run is the controlled path, and the
+membership state on the record is what keeps the two from
+double-proposing the same invoice.
+
+Surfaces: `POST /payments/runs`, `GET /payments/runs[/{id}]`,
+`POST /payments/runs/{id}/decision`,
+`GET /payments/runs/{id}/export`, the console's payment-run
+panel (members, refusals, totals, gate controls, export
+download), and the CLI's `create-run` / `payment-runs` /
+`decide-run` / `export-run` commands.
+
 ## Data services
 
 - **PostgreSQL** — the `records` table (one JSONB payload per
   record, status and supplier promoted to columns for the
   queries the console runs), the `reconciliations` table (same
-  pattern, migration `0002`), and the LangGraph Postgres
+  pattern, migration `0002`), the `payment_runs` table (same
+  pattern again, migration `0003`), and the LangGraph Postgres
   checkpointer. Numbered migrations in `migrations/` run at
   startup; both stores share the one database.
 - **Object storage** — document bytes behind `ObjectStorePort`;

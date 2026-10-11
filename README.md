@@ -57,11 +57,13 @@ cd blueprint-reducto-invoice-ap
 uv sync --extra dev && uv run reducto-ap-agent-demo
 ```
 
-The demo runs the whole synthetic AP world end to end — sixteen
+The demo runs the whole synthetic AP world end to end — the
 submissions covering clean matches, a price drift inside
 tolerance, a short shipment, a duplicate, a credit note, a
-bank-detail fraud attempt, a statement that gets refused — and
-prints the payment packet a named approver's decisions produce.
+bank-detail fraud attempt, statements that get refused and
+then reconciled — and prints the payment packet a named
+approver's decisions produce, then assembles a payment run
+over it and has a treasurer release the batch.
 It runs on the **offline adapter**, the labelled fallback that
 implements the same DocumentPort semantics over the documents'
 text layer; the standard run is the real Reducto profile (see
@@ -178,6 +180,46 @@ by line. That is the second workflow through the same port:
   It cannot approve, alter, or exclude an invoice; the eval
   pack pins that invariance.
 
+## The payment run
+
+The packet proposes; a payment run is how a batch becomes
+controlled. A treasurer assembles a run for a value date — named
+records, or every approved payable record — and the assembly is
+the control:
+
+- **One open run per record.** Assembly holds each member on
+  its record. Naming a held record in a second run refuses it
+  by name, with the holding run's id in the reason — and a
+  record from a released run is refused forever: it is already
+  in a bank export, and paying twice is the failure this exists
+  to prevent.
+- **Nothing ineligible slips in quietly.** Fraud-held and
+  exception records can never enter a run; asking for them
+  produces a named refusal (code + reason) while the run
+  assembles from the eligible remainder. Totals are computed
+  from the member lines and tied back against them before the
+  run exists — credit notes net exactly as they do in the
+  packet.
+- **The treasurer's gate.** The run ends `AWAITING_TREASURER`.
+  A named treasurer **releases** it or **returns** it (a reason
+  is required to return; the AP team reworks on it). Returning
+  frees every member to join a later run. Membership is a state
+  layered over the record, never a rewrite: the record stays
+  `APPROVED`, because the approver's decision and the
+  treasurer's batch are two different humans' acts.
+- **The bank export.** Release generates a payment-instruction
+  CSV once — deterministic bytes, written to the object store
+  under a versioned key, pinned on the run by its SHA-256
+  digest, and served back byte-identical on every download.
+  Its bank details are read from the **supplier master**, never
+  from the invoice: an invoice is a claim by the sender, the
+  master is the verified record, and there is no path by which
+  an invoice's account reaches a bank file.
+- **Still nothing pays itself.** A released run is a
+  controlled proposal handed to the customer's payment
+  systems — `PAID_PROPOSED`, not paid. This system executes
+  no payment, on any path.
+
 ## Configuration
 
 Provider-first: the standard run is Reducto. Copy `.env.example`
@@ -237,6 +279,13 @@ gates on it:
   every class and each must land in its exact class; a second
   statement must reconcile fully; statement totals must tie;
   and no document record may change as a result of reconciling.
+- **Payment runs** — a batch over two approved invoices and
+  the netting credit note must tie its totals; the fraud hold
+  and an exception must be refused by name; a member of an
+  open run must be refused with the holding run named; return
+  must free the members; and the released export must be
+  byte-stable and carry only the supplier master's bank
+  details.
 
 Live-Reducto eval runs are opt-in (`EVAL_LIVE=1` with a key)
 and reported, not gated.
@@ -252,10 +301,11 @@ src/reducto_ap_agent/
   profiles.py      cloud vs vpc, resolved in code
   matching.py      the three-way match, in code
   reconciliation.py statement vs AP records, line by line, in code
+  payments.py      run assembly, the refusals, the bank export, in code
   guardrails.py    bank-detail, payable, and injection screens
   policy.py        every tolerance, in one module
   graph.py         the LangGraph pipeline and its gate
-  service.py       submissions, gate discipline, the packet
+  service.py       submissions, both gates, the packet, payment runs
   store.py / db.py records in Postgres (or the in-memory double)
   datasets.py      the synthetic world — gold by construction
 migrations/        numbered SQL, applied at startup
