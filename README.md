@@ -331,6 +331,57 @@ confirmation is the discipline of answering it:
   unmatched advice cannot be decided — there is nothing to
   accept until it answers a run.
 
+## The AP position at close
+
+The packet answers "what would we pay next". The close asks a
+different question: what does the subledger say we owe, aged,
+by supplier — and does it agree with the packet? The position
+is that read, computed in one pass over the record store:
+
+- **Aged off due dates, against an explicit as-of.** Days past
+  due is computed against a stated date, never a hidden wall
+  clock. Not-yet-due is `CURRENT` however old the invoice is —
+  what matters at close is how far past its terms a payable
+  stands. Buckets (`CURRENT` / `1–30` / `31–60` / `61–90` /
+  `90+`) are authored policy in `policy.py`, printed on the
+  report, and upper-edge inclusive: exactly 30 days past due
+  is `1–30`. An invoice with no due date on record is
+  `UNDATED` — its own line class, totalled and shown, never
+  silently bucketed by an age it does not carry.
+- **One open-amount rule.** Every figure is `credits.py`'s
+  open amount — approved face minus the applied-credit
+  ledger — the same computation the packet and the runs read.
+  The position never recomputes it differently.
+- **The state of the money is a second split of the same
+  total.** Each line is `OPEN_FREE`, `IN_RUN` (held by an open
+  run), or `PAID_PROPOSED` (released, awaiting the bank's
+  confirmation). The state columns and the ageing columns both
+  foot to the same open total, per supplier and per currency,
+  and the report checks its own arithmetic.
+- **A tie that can break, by name.** The packet is not
+  as-of-parameterised, so the position computes both totals
+  from the same records in the same pass — the packet total by
+  the packet's own inclusion rule, the position total as the
+  sum of the aged lines. They can differ only when a record's
+  ledger exceeds its face (open amount negative): application
+  refuses over-credit in code, so that state means a corrupted
+  record. It is kept out of the buckets, listed as a
+  `NEGATIVE_OPEN` anomaly with both figures, and the
+  difference breaks the tie — `POSITION_TIE_BREAK`, per
+  currency. The report never calls itself tied when it is not.
+- **Disclosed, not buried.** Fraud-held invoices sit outside
+  the packet's universe and therefore outside the tie — and
+  are listed beside the position with their flags, because
+  the close should see money in dispute. Fully credited
+  invoices (open exactly 0.00) are listed too: they owe
+  nothing and age nothing, and the cover should be visible.
+- **Surfaces.** `GET /position?as_of=YYYY-MM-DD`, the console's
+  close section (supplier rows expand to the records under
+  them), CLI `position <as-of> [--export]`, the demo's closing
+  act, and a CSV export at `positions/{as_of}/ap-position-v1.csv`
+  in the object store, with its SHA-256 returned beside the
+  bytes in the run exports' idiom.
+
 ## Configuration
 
 Provider-first: the standard run is Reducto. Copy `.env.example`
@@ -420,6 +471,12 @@ gates on it:
   run or a run not on file must be held unmatched with their
   reasons; and the run, its export, and its members'
   approvals must be byte-identical afterwards.
+- **AP position** — bucket placement must be exact including
+  the boundary days; an undated invoice must be named
+  `UNDATED`; the aged total must tie to the packet's open
+  total; the state split must foot to the same figure; and
+  a corrupted record whose ledger exceeds its face must
+  break the tie by name (`POSITION_TIE_BREAK`).
 
 Live-Reducto eval runs are opt-in (`EVAL_LIVE=1` with a key)
 and reported, not gated.
@@ -438,6 +495,7 @@ src/reducto_ap_agent/
   reconciliation.py statement vs AP records, line by line, in code
   payments.py      run assembly, the refusals, the bank export, in code
   confirmations.py remittance vs the released run, line by line, in code
+  position.py      the AP position at close: ageing + the tie-out, in code
   guardrails.py    bank-detail, payable, and injection screens
   policy.py        every tolerance, in one module
   graph.py         the LangGraph pipeline and its gate

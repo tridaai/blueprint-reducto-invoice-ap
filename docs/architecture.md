@@ -526,6 +526,67 @@ per-run lines with proposed beside paid, the summary,
 controller controls), and the CLI's `confirm` /
 `confirmations` commands.
 
+## The AP position
+
+`position.py` is a pure read over the record store — it has
+no store of its own, no migration, and no gate, because it
+decides nothing: it reports. `build_position(records, as_of)`
+takes one snapshot and computes both totals the close needs
+from it, because the packet (`service.payment_packet`) is a
+"now" read with no as-of parameter: passing the position an
+as-of and asking it to tie against a packet computed at some
+other instant would compare two different worlds. So the tie
+is internal by construction and asserted: the packet total
+recomputed under the packet's own inclusion rule (APPROVED +
+invoice + extraction, at `credits.open_amount`) against the
+position total (the sum of the aged lines), per currency,
+inside one pass over one snapshot.
+
+The two totals can differ in exactly one way. The aged lines
+hold positive opens only; the packet's rule also carries a
+negative open. A negative open means the applied-credit
+ledger exceeds the face — application refuses over-credit in
+code, so the state is only reachable by a record written
+outside the credit path. Rather than age a negative payable
+(a meaningless bucket) or silently drop it (a silent tie),
+the position lists it as a `NEGATIVE_OPEN` anomaly and lets
+the difference stand as a named `POSITION_TIE_BREAK` with
+both figures. The report's `tie_status` is the verdict; the
+CSV prints it on its face.
+
+Ageing keys off the extraction's `due_date` (an ISO date on
+the document's face; both adapters extract it). Bucket edges
+are `policy.AgeingPolicy` (30/60/90, upper-edge inclusive),
+printed on the report as `bucket_edges` so a reader never has
+to trust that the edges are what the prose claims. A missing
+or unreadable due date yields the `UNDATED` bucket with
+`days_past_due: null` — the money still totals, because it is
+still owed; it simply does not pretend to an age.
+
+The state split reads `payment_state` off the same records
+(`None` → `OPEN_FREE`, `IN_RUN`, `PAID_PROPOSED`) and must
+foot to the open total exactly as the bucket split does;
+`splits_agree` is the report checking itself. Fraud-held
+invoices are deliberately outside both totals: the packet
+excludes them, so including them would break the tie by
+design rather than by defect — they are carried as a
+disclosed section with their flags and their own totals.
+Fully credited invoices (open exactly zero, non-empty
+ledger) are carried the same way: visible, zero-weighted.
+
+Surfaces: `ApService.ap_position(as_of)` /
+`position_export(as_of)`, `GET /position?as_of=`,
+`GET /position/export?as_of=` (CSV download; `X-Export-Key`
+and `X-Export-Sha256` headers carry the artifact's identity
+in the run-export idiom), the console's close section
+(supplier rows are `<details>` elements expanding to their
+records), CLI `position <as-of> [--export]`, and the demo's
+closing act. The export is re-rendered on demand rather than
+served from a stored artifact — the position is a projection
+of live records, not a decision, so there is no released
+moment to freeze; the digest identifies the bytes of the
+rendering that was filed.
+
 ## Data services
 
 - **PostgreSQL** — the `records` table (one JSONB payload per

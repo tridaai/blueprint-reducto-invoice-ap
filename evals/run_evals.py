@@ -47,6 +47,17 @@ Gates (a failure exits non-zero):
   credit against an invoice already paid-proposed. The
   released export instructs the net figure and carries no
   negative credit line.
+- AP position — the close read over a planted world (its own
+  service, records planted directly so the due dates are
+  exact): bucket placement is exact including the boundary
+  days (30 days past due is 1–30, 31 is 31–60), an invoice
+  with no due date is UNDATED and named, the aged total ties
+  to the packet's open total computed in the same pass, the
+  state split (free / in-run / paid-proposed) foots to the
+  same figure, and a corrupted record — a credit ledger
+  exceeding its invoice's face, which application refuses in
+  code — breaks the tie by name (POSITION_TIE_BREAK) with
+  both figures.
 
 Reported, not gated: per-field extraction accuracy, review-queue
 precision. A live run (EVAL_LIVE=1, DOCUMENT_BACKEND=reducto,
@@ -69,6 +80,12 @@ from reducto_ap_agent.errors import GateError  # noqa: E402
 from reducto_ap_agent.graph import ApPipeline  # noqa: E402
 from reducto_ap_agent.object_store import InMemoryObjectStore  # noqa: E402
 from reducto_ap_agent.offline_docs import OfflineDocumentAdapter  # noqa: E402
+from reducto_ap_agent.schemas import (  # noqa: E402
+    CreditApplication,
+    DocumentRecord,
+    ExtractedDocument,
+    ExtractedField,
+)
 from reducto_ap_agent.service import ApService  # noqa: E402
 from reducto_ap_agent.store import InMemoryRecordStore  # noqa: E402
 
@@ -530,6 +547,105 @@ def evaluate(service: ApService) -> dict:
         "export_net": export_net,
     }
 
+    # -- AP position scenario ------------------------------------
+    # Its own service and planted records, so the due dates are
+    # exact to the day and nothing above is disturbed.
+    position_service = build_offline_service()
+
+    def plant(record_id, supplier, number, total, *, due="2026-11-15",
+              status="APPROVED", payment_state=None, run_id=None,
+              credits=(), fraud_flags=()):
+        fields = {
+            "invoice_number": ExtractedField(value=number),
+            "invoice_date": ExtractedField(value="2026-09-01"),
+            "total": ExtractedField(value=total),
+        }
+        if due is not None:
+            fields["due_date"] = ExtractedField(value=due)
+        position_service.store.save(DocumentRecord(
+            record_id=record_id, submission_id="SUB-EVAL",
+            supplier_name=supplier, status=status, doc_class="invoice",
+            extraction=ExtractedDocument(
+                doc_class="invoice", fields=fields, currency="USD"),
+            payment_state=payment_state, payment_run_id=run_id,
+            credits_applied=[
+                CreditApplication(
+                    credit_record_id=f"{record_id}-CR{i}",
+                    credit_number=f"CN-EV-{i}",
+                    invoice_record_id=record_id, amount=amount,
+                    currency="USD", actor="Eval Controller",
+                ) for i, amount in enumerate(credits)
+            ],
+            fraud_flags=list(fraud_flags),
+        ))
+
+    plant("REC-EV-A1", "Acme", "INV-EV-1", 100.0, due="2026-10-16")
+    plant("REC-EV-A2", "Acme", "INV-EV-2", 200.0, due="2026-10-15")
+    plant("REC-EV-A3", "Acme", "INV-EV-3", 300.0, due=None)
+    plant("REC-EV-B1", "Beta", "INV-EV-4", 400.0, due="2026-11-20",
+          payment_state="IN_RUN", run_id="RUN-EV-01")
+    plant("REC-EV-B2", "Beta", "INV-EV-5", 500.0, credits=(500.0,))
+    plant("REC-EV-F1", "Granite", "INV-EV-6", 900.0,
+          status="FRAUD_REVIEW", fraud_flags=("bank-change pattern",))
+
+    position = position_service.ap_position("2026-11-15")
+    planted_lines = {
+        line.record_id: line
+        for s in position.suppliers for line in s.lines
+    }
+    buckets_exact = (
+        planted_lines["REC-EV-A1"].bucket == "1-30"
+        and planted_lines["REC-EV-A1"].days_past_due == 30
+        and planted_lines["REC-EV-A2"].bucket == "31-60"
+        and planted_lines["REC-EV-A2"].days_past_due == 31
+        and planted_lines["REC-EV-B1"].bucket == "CURRENT"
+        and position.bucket_totals_by_currency["USD"] == {
+            "CURRENT": 400.0, "1-30": 100.0, "31-60": 200.0,
+            "61-90": 0.0, "90+": 0.0, "UNDATED": 300.0,
+        }
+    )
+    undated_named = (
+        planted_lines["REC-EV-A3"].bucket == "UNDATED"
+        and planted_lines["REC-EV-A3"].days_past_due is None
+    )
+    (usd_tie,) = [t for t in position.ties if t.currency == "USD"]
+    tie_holds = (
+        position.tie_status == "TIED"
+        and usd_tie.packet_total == usd_tie.position_total == 1000.0
+        and usd_tie.packet_total
+        == position_service.payment_packet().totals_by_currency["USD"]
+        and [f.invoice_number for f in position.fully_credited]
+        == ["INV-EV-5"]
+        and [h.invoice_number for h in position.fraud_held] == ["INV-EV-6"]
+    )
+    state_split_sums = (
+        position.state_totals_by_currency["USD"] == {
+            "OPEN_FREE": 600.0, "IN_RUN": 400.0, "PAID_PROPOSED": 0.0,
+        }
+        and position.splits_agree
+    )
+    # The corrupted record: a ledger exceeding its face. The
+    # credit path refuses this in code, so only corruption
+    # writes it — and the position must refuse to tie over it.
+    plant("REC-EV-N1", "Acme", "INV-EV-7", 400.0, credits=(450.0,))
+    broken = position_service.ap_position("2026-11-15")
+    (broken_tie,) = [t for t in broken.ties if t.currency == "USD"]
+    tie_break_named = (
+        broken.tie_status == "POSITION_TIE_BREAK"
+        and broken_tie.packet_total == 950.0
+        and broken_tie.position_total == 1000.0
+        and broken_tie.difference == -50.0
+        and [a.code for a in broken.anomalies] == ["NEGATIVE_OPEN"]
+        and broken.anomalies[0].invoice_number == "INV-EV-7"
+    )
+    position_results = {
+        "buckets_exact": buckets_exact,
+        "undated_named": undated_named,
+        "tie_holds": tie_holds,
+        "state_split_sums": state_split_sums,
+        "tie_break_named": tie_break_named,
+    }
+
     total_cases = len(cases)
     passed = sum(1 for c in cases if c["passed"])
     results = {
@@ -551,6 +667,7 @@ def evaluate(service: ApService) -> dict:
         "payment_runs": payment_run_results,
         "remittance_confirmation": confirmation_results,
         "credit_notes": credit_results,
+        "ap_position": position_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
@@ -585,6 +702,11 @@ def evaluate(service: ApService) -> dict:
             credit_results["full_cover_excludes"],
         "credit_refusals_named": credit_results["refusals_named"],
         "credit_export_carries_net_amounts": credit_results["export_net"],
+        "position_buckets_exact": position_results["buckets_exact"],
+        "position_undated_named": position_results["undated_named"],
+        "position_ties_to_packet": position_results["tie_holds"],
+        "position_state_split_sums": position_results["state_split_sums"],
+        "position_tie_break_named": position_results["tie_break_named"],
     }
     results["gate_passed"] = all(results["gates"].values())
     return results

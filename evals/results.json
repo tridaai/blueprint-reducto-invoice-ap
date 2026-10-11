@@ -57,6 +57,13 @@
     "refusals_named": true,
     "export_net": true
   },
+  "ap_position": {
+    "buckets_exact": true,
+    "undated_named": true,
+    "tie_holds": true,
+    "state_split_sums": true,
+    "tie_break_named": true
+  },
   "failures": [],
   "gates": {
     "match_decision_accuracy == 1.0": true,
@@ -79,7 +86,12 @@
     "credit_application_nets_the_invoice": true,
     "credit_full_cover_excludes_from_run": true,
     "credit_refusals_named": true,
-    "credit_export_carries_net_amounts": true
+    "credit_export_carries_net_amounts": true,
+    "position_buckets_exact": true,
+    "position_undated_named": true,
+    "position_ties_to_packet": true,
+    "position_state_split_sums": true,
+    "position_tie_break_named": true
   },
   "gate_passed": true
 }
