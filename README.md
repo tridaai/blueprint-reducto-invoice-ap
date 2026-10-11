@@ -34,6 +34,12 @@ prompts:
   verified out of band and recorded in the master.
 - **What is not an invoice never reaches the payment path.** A
   statement or letter is refused with the reason on its record.
+- **A paid invoice, sent again, is a hold, never a second
+  payment.** An arrival that answers to an invoice already
+  released for payment — same supplier, same number, at the
+  paid face or the net figure the run instructed — stops at
+  `PAID_DUPLICATE_HOLD` on the paid evidence, and only a named
+  controller can rule on it.
 - **The match is arithmetic.** Tolerances live in one policy
   module; every exception names its code and its figures.
 
@@ -439,6 +445,69 @@ its record:
   Harborlight's ledger, the richest story in the world:
   credits, a confirmation, and a statement full of breaks.
 
+## The duplicate that arrives second
+
+The pipeline's own duplicate check owns the copy that arrives
+while its twin is still in the case: same supplier, same
+invoice number — an exception, back to the sender. The
+dangerous duplicate is the one that arrives **after** the
+original was approved, assembled into a payment run, and
+released. It extracts cleanly and matches its PO; nothing
+pending resembles it, because its twin is no longer pending.
+It is paid.
+
+The watch (`duplicates.py`) stands at intake, on the
+completed extraction, and checks the arrival against **paid
+history**:
+
+- **The keys.** Same supplier — the intake's resolved
+  identity, never a resemblance. Same invoice number,
+  normalised the way credits and confirmations normalise
+  (strip, upper-case) — the older pipeline check compares raw
+  strings, so a resend read with different case or spacing
+  slips it; the watch does not. And the arrival's amount
+  equal, **to the cent** — no tolerance comes near this check;
+  a duplicate judgement is an accusation, not a reading.
+- **Two bases, named on the hold.** `FACE`: the arrival
+  states the paid invoice's approved face. `NET`: it states
+  the figure the released run actually instructed — the face
+  minus the credits applied before release. A supplier who
+  was credited and re-bills at the net figure is the classic
+  second arrival, and the hold says which figure it matched.
+  An arrival at any other amount is **not held**: the number
+  rule surfaces it as a `DUPLICATE_INVOICE` exception, as
+  before — a different amount is a different claim. A
+  different number at the paid amount is a different bill and
+  is not held either.
+- **The hold.** A hit stops the record at
+  `PAID_DUPLICATE_HOLD`, with the paid evidence on its face:
+  the original record, the run that released it, who released
+  it and when, and the amount the export instructed. The
+  approver's gate refuses to decide it (**409**, the evidence
+  named — the fraud-hold precedent), and a payment run refuses
+  it by name. The watch list — `GET /duplicates/watch`, the
+  console section, CLI `duplicate-watch` — shows every
+  standing hold with its evidence and its age, and the
+  supplier's ledger row and page carry it too.
+- **Resolution is a controller's act, with a reason, two
+  exits only.** `CONFIRMED_DUPLICATE`: the record is refused
+  permanently, the evidence and the ruling as its refusal
+  reason; nothing is deleted. `RELEASED_NOT_DUPLICATE`: the
+  hold lifts and the record returns to **the state its own
+  match earned** — awaiting the approver (and decidable,
+  even though its submission's gate closed when it arrived),
+  or its exception, standing in the open. Identity is the
+  record, not the number: a second arrival of the same
+  document is a new record and is held afresh, so a release
+  cannot be laundered by resending.
+- **What it never does.** No clawback, no recovery workflow,
+  no touching the released run, its export, or the original
+  payment — both are byte-identical across any hold and
+  resolution, and the eval pack pins it. The original's own
+  credit notes and remittance advices behave exactly as they
+  did before the watch existed; a bank-change resend is a
+  fraud case first and never the watch's.
+
 ## Configuration
 
 Provider-first: the standard run is Reducto. Copy `.env.example`
@@ -541,6 +610,17 @@ gates on it:
   ledger; the credit, confirmation, and open-break story
   must render whole; and the bank warning must be present
   exactly where a document disagreed with the master.
+- **Paid-duplicate watch** — a released invoice re-submitted
+  verbatim must be held on its paid evidence, the gate's
+  refusal must name that evidence, and a controller's release
+  must make the record decidable at its long-closed gate; in
+  a planted universe, a re-bill at the net figure must be
+  held on the `NET` basis, a different amount must surface
+  under the number rule unheld, a different number at the
+  paid amount must not be held, resolutions without actor or
+  reason must be refused, a second arrival must re-hold after
+  a release, and the paid record and its run must be
+  byte-identical throughout.
 
 Live-Reducto eval runs are opt-in (`EVAL_LIVE=1` with a key)
 and reported, not gated.
@@ -561,6 +641,7 @@ src/reducto_ap_agent/
   confirmations.py remittance vs the released run, line by line, in code
   position.py      the AP position at close: ageing + the tie-out, in code
   ledger.py        the supplier ledger: one supplier, the whole relationship
+  duplicates.py    the paid-duplicate watch: arrivals vs paid history, in code
   guardrails.py    bank-detail, payable, and injection screens
   policy.py        every tolerance, in one module
   graph.py         the LangGraph pipeline and its gate

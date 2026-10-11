@@ -674,6 +674,125 @@ like `/position`'s, and always stated on the payload), the
 console's ledger section, CLI `suppliers <as-of>` /
 `ledger <supplier-id> <as-of>`, and the demo's closing act.
 
+## The paid-duplicate watch
+
+Two duplicate defences exist in this system, and the
+architecture keeps them apart on purpose. The pipeline's
+`_duplicate_check` (graph.py) is a *case* check: it compares
+an arrival against the records in the store by supplier and
+invoice number (raw string equality), and brands a second
+copy `DUPLICATE_INVOICE` — an exception, back to the sender,
+with no path onward and nothing to say about payment. That
+is the right instrument for the co-pending copy. It is the
+wrong one for the arrival that comes after its twin was
+paid: there, an exception buries the one fact that matters —
+**the money already left** — and a dead end gives a human no
+honest way to rule on a legitimate late arrival.
+
+`duplicates.py` is the second instrument, keyed on paid
+history. The pipeline calls `find_paid_duplicate` in
+`_process_one` the moment an invoice's extraction completes
+and its supplier is resolved — before the match result can
+route the record anywhere, and before the generic check (a
+held record is not also branded with the blunter instrument;
+its match is the document's own verdict, untouched). The
+check is pure over the store snapshot:
+
+- **Supplier** is the resolved `supplier_id` — the intake's
+  exact join, never a resemblance.
+- **Number** is compared under the normalisation the repo
+  already uses for invoice identity (credits.py,
+  confirmations.py, reconciliation.py each define the same
+  two operations: strip, upper-case). The older pipeline
+  check's raw comparison is a real hole — a resend whose
+  number the engine read as `inv-1001` is not `INV-1001` to
+  it — and the watch closes it for the paid case.
+- **The twin must be paid**: its record carries
+  `payment_state == "PAID_PROPOSED"` *and* its run stands
+  `RELEASED`. Both readings are required; either alone is a
+  state the store could be caught mid-write in, and the
+  conjunction is also the precise business fact — a human
+  released a batch instructing this payment.
+- **The amount must equal, to the cent**, one of two figures
+  from the twin's paid story: its approved face, or the run
+  line's instructed amount (the face minus the credits
+  applied before release — read off the line, not recomputed:
+  the line is what the bank was told). The module imports no
+  tolerance; `matching.py`'s tolerances exist to absorb
+  reading noise, and this is not a reading. Which figure
+  matched is recorded as `amount_basis` — `FACE` wins ties,
+  because an arrival stating the face of a payment that
+  happened to instruct the same figure is most plainly read
+  as the paid bill restated.
+
+A hit is stored on the arrival's own record as a
+`PaidDuplicateHold` payload and the record's status becomes
+`PAID_DUPLICATE_HOLD`. Everything downstream then refuses it
+in its own idiom: the gate (`decide`) raises `GateError`
+with the evidence in the message — the `FRAUD_REVIEW`
+precedent, a state the gate cannot decide past; run assembly
+refuses it by name (`PAID_DUPLICATE_HOLD`, the holding run
+named); the packet and the position never see it, because
+both read `APPROVED` records only. No new table is needed:
+records are JSONB payloads, and the watch writes no record
+of its own — the hold is a state of the arrival, not a
+second ledger.
+
+Resolution is `ApService.resolve_duplicate_hold`, a
+controller's act in the `decide_reconciliation` shape: action,
+named actor, **required reason**, refusal of anything not
+currently held (with the prior resolution quoted back when
+there is one). `CONFIRMED_DUPLICATE` moves the record to
+`REFUSED` and writes the evidence plus the ruling into its
+`refusal_reason` — a permanent, inspectable refusal, not a
+deletion. `RELEASED_NOT_DUPLICATE` recomputes nothing: the
+record returns to `EXCEPTION` when its match carries
+exception codes, else `AWAITING_APPROVER`. Two consequences
+are designed. First, the released record is *decidable*: its
+submission's graph ran to completion when it arrived (a held
+record never interrupts the gate), so the thread has no
+interrupt to resume, and a plain resume would silently apply
+nothing — `decide` therefore checks, after resuming, for
+records still awaiting with a decision recorded against
+them, and applies those decisions directly through
+`apply_gate_decision`, the graph's apply write factored into
+one implementation so both paths land identically. Second,
+the release adjudicates the *record*: identity here is
+`record_id`, not the invoice number. A second arrival of the
+same document mints a new record, the paid history has not
+changed, and the watch holds it again — the eval pack pins
+this, because the alternative (a per-number release) is
+exactly the laundering path the control exists to close.
+
+The boundaries are part of the design, stated rather than
+implied:
+
+- **Not held**: an arrival whose twin is unpaid or held by
+  an *open* run (the number rule's case); an arrival at any
+  amount other than face or net (the number rule surfaces
+  it, codes standing); an arrival under a different number
+  (a different bill, however similar the amount); a
+  fraud-flagged arrival (the fraud hold is computed first
+  and owns the record — a bank-change resend is investigated
+  as fraud, and its duplicateness is the least of it).
+- **Never done**: no clawback or recovery state, no edit to
+  the released run, its export, or the original record (the
+  eval pins byte-identity across a hold, a confirmation, and
+  a release), and no change to how the paid invoice's own
+  credit notes are refused late (`TARGET_PAID_PROPOSED`) or
+  how its run is confirmed. Credit notes and advices are not
+  invoice-class arrivals and the watch never looks at them.
+
+Surfaces: `ApService.list_duplicate_watch(as_of)` /
+`resolve_duplicate_hold(...)`, `GET /duplicates/watch`
+(as-of ages the holds, explicit for the position's reasons),
+`POST /records/{record_id}/duplicate-resolution`, the
+console's watch section (evidence, age, both exits) plus the
+record detail's hold block, the ledger's marker on the
+supplier's index row (`duplicate_hold_count`) and the hold
+carried on the ledger's invoice lines, CLI `duplicate-watch`
+/ `resolve-duplicate`, and the demo's closing sequence.
+
 ## Data services
 
 - **PostgreSQL** — the `records` table (one JSONB payload per
