@@ -591,6 +591,71 @@ agrees on what that means:
   held — the remainder was never paid; the number rule
   surfaces it as a different claim, as before.
 
+## PO coverage
+
+The match is per-invoice arithmetic: this invoice, against this order,
+within these tolerances. It cannot see accumulation — three honest
+invoices, each matching cleanly, can together bill one purchase order
+past its total, and no per-invoice check anywhere says so. Coverage is
+the cumulative view the match does not have: for every order, what has
+been billed against it in total (`GET /po-coverage`, `po-coverage` on
+the CLI, the console's PO coverage section):
+
+- **Only approved money bills an order.** A record counts once the
+  approver has approved it; awaiting, exception, rejected, refused, and
+  fraud-held money charges the order nothing, however plausible the
+  document. The billed figure per invoice is its **billable amount** —
+  the approved face minus the credits applied against it. A credit
+  reduces the bill itself, so it reduces billed; a payment only settles
+  a bill that stands, so a part-paid invoice bills in full, exactly as
+  charged.
+- **The total is the order register's, and the row says so.** Totals
+  come from the purchase-order register (the customer's ERP mirror in a
+  real deployment), named `ORDER_REGISTER` on the row. An order an
+  approved invoice names that the register does not carry gets **no
+  verdict**: it reads **UNMEASURED**, its billed sum listed, its total
+  shown as not on file. Coverage never invents a total from the
+  invoices billing against the order — that would grade the leak
+  against the leak.
+- **Verdicts, thresholds printed on the view.** **WITHIN** below the
+  watch threshold, **WATCH** at or above it (80% by default —
+  `CoveragePolicy` in `policy.py`, beside the match tolerances and the
+  ageing policy), **EXCEEDED** when billed passes the total. Exceeded
+  is a comparison to the cent, not a percentage judgement: an order
+  billed to exactly 100% is fully billed, and reads WATCH. Rows rank
+  EXCEEDED first, then WATCH, then WITHIN, UNMEASURED last — named,
+  never hidden. Each row lists its contributing invoices in billing
+  order with running cumulatives, so the line that crosses a threshold
+  is the line you see crossing it. An invoice billing in a currency
+  other than the order's is never silently converted: it is listed on
+  the row as excluded, with the reason.
+- **Coverage informs; it never blocks, and never rewrites.** An
+  exceeded order is not fraud and not a match failure — change orders
+  and blanket orders over-bill legitimately, and the register's total
+  is reference data that can lag the paperwork, so the gate stays the
+  approver's. What coverage does is make sure the fact is in front of
+  them: the record's own coverage fact (`GET
+  /records/{id}/po-coverage`, and the console's record detail) counts
+  the invoice in front of them in — *"Order PO-6010 stands billed at
+  200.0% (1200.00 of 600.00 USD) including this invoice — EXCEEDED"* —
+  and a decision taken while the order stands EXCEEDED is recorded on
+  the record's audit trail with that fact quoted, so the approver's
+  context survives the screen they read. Every contributing invoice
+  keeps the match outcome it earned: the match is one fact, coverage a
+  second fact on a second axis.
+- **The other readers, honestly scoped.** The supplier ledger's
+  invoice rows name each invoice's order and carry its coverage state
+  — display only; no ledger total, tie, or figure reads them. The aged
+  position is **untouched**: the position asks what is still *owed*,
+  coverage asks what has been *billed*, and the two ledgers are never
+  merged.
+
+The seeded world convicts itself here: INV-1010 and INV-3001 each bill
+PO-6010's whole 600.00 — every per-invoice check passed both, and
+together the order stands at 200%. INV-1002 bills PO-6002 1% past its
+total, inside its line tolerances. The demo's final act prints the
+ranked view over exactly that world.
+
 ## Configuration
 
 Provider-first: the standard run is Reducto. Copy `.env.example`
@@ -720,6 +785,16 @@ gates on it:
   instructing only its own part; and resends must be held on
   the cumulative instructed figure — 1200.00 after the first
   run, 1800.00 after both.
+- **PO coverage** — planted invoices accumulate against one
+  order through WITHIN, WATCH, and EXCEEDED with hand-derived
+  cumulatives; a credit applied to a member reduces billed
+  back to exactly the total, a released part payment against
+  a member reduces it not at all; an unapproved invoice and
+  one naming no order contribute nothing, and an order no
+  register carries reads UNMEASURED, billed sum listed,
+  ranked last; and on the main service the world's own pair
+  stands at 200% of PO-6010, the crossing approval unblocked,
+  its match untouched, the coverage fact on its record.
 
 Live-Reducto eval runs are opt-in (`EVAL_LIVE=1` with a key)
 and reported, not gated.
@@ -739,6 +814,7 @@ src/reducto_ap_agent/
   payments.py      run assembly, the refusals, the bank export, in code
   confirmations.py remittance vs the released run, line by line, in code
   position.py      the AP position at close: ageing + the tie-out, in code
+  coverage.py      PO coverage: cumulative billed per order, against its total
   ledger.py        the supplier ledger: one supplier, the whole relationship
   duplicates.py    the paid-duplicate watch: arrivals vs paid history, in code
   guardrails.py    bank-detail, payable, and injection screens

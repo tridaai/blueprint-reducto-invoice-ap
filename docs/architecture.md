@@ -911,6 +911,95 @@ still answers one run's lines, so a part-paid invoice's
 remainder is confirmed, if at all, by the later run's own
 advice.
 
+## PO coverage
+
+The match (above) is per-invoice arithmetic, and it is correct
+to keep it that way — but correctness per invoice does not sum
+to correctness per order. Coverage (`coverage.py`, a pure read
+model in the position's and the ledger's idiom) is the second
+axis: what approved invoices have together charged each
+purchase order, against the total the order register states.
+
+The definitions are pinned, because a coverage figure is only
+as honest as its terms:
+
+- **Billable** is `credits.billable_amount`: the approved face
+  minus the credits applied against it. The credit belongs in
+  the figure because a credit is the supplier taking money off
+  the charge itself; a payment does not, because payment is
+  settlement — the charge stands whether it has been settled
+  in part, in full, or not at all. This keeps coverage and the
+  open amount from ever being confused: open answers "what is
+  still owed on this invoice", billed answers "what has this
+  invoice charged its order", and a fully paid invoice is 0.00
+  on the first and its full billable figure on the second.
+- **The universe** is records with `doc_class == "invoice"`,
+  `status == "APPROVED"`, an extraction, and a non-empty
+  `po_reference` — the identity invoices already carry, resolved
+  against the same register the match reads. Approval is the
+  moment money becomes real in this system everywhere else (the
+  packet, the runs, the position, the ledger all take exactly
+  APPROVED), and coverage takes the same line: unapproved money
+  has charged nothing.
+- **The total's source is stated per row**: `ORDER_REGISTER`,
+  the `PurchaseOrder.total` from the reference data (the
+  customer's ERP mirror in production), or `NOT_ON_FILE` — an
+  order known only through the invoices naming it. That second
+  case gets no derived total and no verdict: state UNMEASURED,
+  total `None`, billed sum listed. Deriving a total from the
+  billing itself would make every order read exactly 100% by
+  construction; the absence of a total is a fact to surface,
+  not a gap to paper over.
+- **States** come from `CoveragePolicy` in `policy.py`, beside
+  the match tolerances and the ageing policy: WITHIN below the
+  watch percentage (80.0 by default), WATCH at or above it,
+  EXCEEDED when billed passes the total — compared in cents,
+  not via the rounded percentage, so exactly 100.0% is a fully
+  billed order (WATCH) and one cent past it is EXCEEDED. The
+  report carries the threshold on its face.
+- **Currency discipline**: a row speaks the order's currency
+  (the register's; for an off-register order, its first counted
+  contributor's). A contributor billing in another currency is
+  not summed and not converted — it is listed on the row as
+  excluded with the reason named. Silent conversion is how
+  coverage figures become fictions.
+
+**Inform, never block — and why.** The gate's blocking powers
+in this codebase are reserved for deception and certainty:
+FRAUD_REVIEW stops payment because the document may be an
+attack; the paid-duplicate hold stops the gate because the
+payment evidence is a fact about money already gone. An
+EXCEEDED order is neither. Every contributing invoice matched
+on its own merits; over-billing an order is a routine,
+legitimate event (change orders, blanket orders, register
+totals lagging amendments); and the total it is measured
+against is reference data, which can be stale. Letting stale
+reference data veto clean invoices would invert the system's
+epistemics. So coverage takes the position's NEGATIVE_OPEN
+posture instead: name the break loudly, in front of the human
+whose decision it is. Concretely: the per-record fact
+(`record_coverage`, counting the invoice in front of the
+approver into the billed figure) rides the record's surfaces
+before the gate; and `ApService.decide` writes one audit entry
+— `po_coverage_at_decision`, quoting the fact — onto a record
+whose decision lands while its order stands EXCEEDED counting
+it. That entry is the module family's one deliberate write,
+and it exists so the decision's context is itself auditable:
+nobody can later say the approver never saw the accumulation,
+and nobody needs to take the console's word for what was on
+the screen. Match outcomes are never touched — coverage reads
+records and reference data; the match reads a document and an
+order; they share inputs, not verdicts.
+
+Deliberately not built: no line-level coverage (which PO
+*lines* are exhausted) — the register's receipts already give
+the match per-line truth, and order-total coverage is the leak
+that was invisible; no per-order budgets beyond the register
+total; no blocking threshold at any percentage; and no merge
+with the position — billed and owed are different ledgers, and
+a reader who wants both can put the two reports side by side,
+as the console does.
+
 ## Data services
 
 - **PostgreSQL** — the `records` table (one JSONB payload per
