@@ -10,6 +10,14 @@ deterministic work — the document engine behind its port, the
 guardrails, the match in code. Everything after it is the
 application of a human's recorded decision.
 
+One stop stands before the screen: a payable document whose
+supplier resolves to no master record — by neither the name it
+states nor the purchase order it references — is held at the
+door in NEW_SUPPLIER_REVIEW (enrolment.py), unstamped by any
+judgement, until a controller enrols the supplier (the service
+re-runs this adjudication on the released record through
+``readjudicate``) or refuses the document.
+
 Records, not state, are the system of record: the graph's state
 carries ids and the submission bytes; every fact about a document
 lives on its :class:`DocumentRecord` in the store.
@@ -27,10 +35,16 @@ from langgraph.types import interrupt
 
 from . import guardrails
 from .duplicates import evidence_summary, find_paid_duplicate
+from .enrolment import build_hold, hold_summary
 from .matching import match_invoice
-from .policy import ATTACHMENT_CLASSES, DEFAULT_POLICY, MatchPolicy
+from .policy import (
+    ATTACHMENT_CLASSES,
+    DEFAULT_POLICY,
+    MatchPolicy,
+    PAYABLE_CLASSES,
+)
 from .ports import DocumentPort, ObjectStorePort
-from .schemas import DocumentRecord, GateDecision
+from .schemas import DocumentRecord, GateDecision, Supplier
 
 log = logging.getLogger(__name__)
 
@@ -205,6 +219,60 @@ class ApPipeline:
         if supplier is not None:
             record.supplier_id = supplier.supplier_id
             record.supplier_name = supplier.name
+        elif record.doc_class in PAYABLE_CLASSES:
+            # The stop at the door (enrolment.py): the supplier
+            # resolved neither by the name the document states
+            # nor by the purchase order it references, so there
+            # is no master record to screen or match it against.
+            # The record stops here — unstamped by any judgement
+            # it never had (no match, no fraud screen) — until a
+            # named controller enrols the supplier or refuses
+            # the document.
+            record.supplier_hold = build_hold(
+                str(extraction.value("supplier_name") or ""),
+                list(ref.suppliers.values()), at=_now(),
+            )
+            record.status = "NEW_SUPPLIER_REVIEW"
+            record.audit.append({
+                "event": "new_supplier_hold", "at": _now(),
+                "detail": (
+                    hold_summary(record.supplier_hold)
+                    + " — held at the door in NEW_SUPPLIER_REVIEW: "
+                      "not matched, not fraud-screened (there is "
+                      "no master record to screen against), and "
+                      "not decidable at the gate; a controller "
+                      "enrols the supplier or refuses the document"
+                ),
+            })
+            record.updated_at = _now()
+            return self.store.save(record)
+        return self._adjudicate(record, supplier)
+
+    def readjudicate(
+        self, record: DocumentRecord, supplier: Supplier
+    ) -> DocumentRecord:
+        """Re-run the adjudication on a record the door held,
+        under the supplier a controller has just enrolled: the
+        pipeline's judgement — fraud screen, paid-duplicate
+        watch, match, status — computed by the one
+        implementation, so a released record is judged exactly
+        as it would have been had the master carried its
+        supplier when it arrived (``apply_gate_decision``
+        states the same factoring for the gate). The caller
+        owns the release's own audit entry and the hold's
+        resolution; this owns the judgement and the save."""
+        record.supplier_id = supplier.supplier_id
+        record.supplier_name = supplier.name
+        return self._adjudicate(record, supplier)
+
+    def _adjudicate(
+        self, record: DocumentRecord, supplier: Supplier | None
+    ) -> DocumentRecord:
+        ref = self.store.reference
+        extraction = record.extraction
+        assert extraction is not None
+        po = ref.purchase_orders.get(
+            str(extraction.value("po_reference") or ""))
 
         # Fraud screen — before the match outcome means anything.
         # The master is versioned, so the comparison is as of the

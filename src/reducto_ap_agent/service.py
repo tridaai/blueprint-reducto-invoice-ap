@@ -69,6 +69,16 @@ gate discipline:
   judges each invoice against the version in force on the
   invoice's own date; a decided record's stamped flags are
   history and are never re-judged when a new version lands.
+- unknown suppliers stop at the door (enrolment.py): a
+  payable document whose supplier resolves to no master
+  record is held in NEW_SUPPLIER_REVIEW — unmatched,
+  unscreened, undecidable, unpaid — until a named controller
+  enrols the supplier or refuses the document. Enrolment is
+  a bank-details recording and inherits the master's
+  governance whole: actor, details, and the source they were
+  verified from, or it does not happen; it creates exactly
+  one master record and releases every held record of the
+  identity back into the pipeline's own adjudication.
 """
 
 from __future__ import annotations
@@ -98,6 +108,7 @@ from .credits import (
     unapplied_reason,
 )
 from .duplicates import evidence_summary, watch_entry
+from .enrolment import build_review_queue, hold_summary
 from .errors import (
     ConfirmationError,
     CoverageError,
@@ -130,6 +141,8 @@ from .schemas import (
     CoverageReport,
     DocumentRecord,
     DuplicateHoldResolution,
+    Enrolment,
+    NewSupplierReview,
     NotOursMark,
     PaymentConfirmation,
     PaymentEntry,
@@ -139,6 +152,8 @@ from .schemas import (
     PositionReport,
     RecordCoverage,
     Reconciliation,
+    Supplier,
+    SupplierHoldResolution,
     SupplierIndex,
     SupplierLedger,
     TreasurerDecision,
@@ -210,6 +225,19 @@ class ApService:
                 "controller resolves the hold on the record "
                 "(confirm it, or release it as not a duplicate) "
                 "with a reason"
+            )
+        if record.status == "NEW_SUPPLIER_REVIEW":
+            hold = record.supplier_hold
+            evidence = (
+                hold_summary(hold) if hold is not None
+                else "the record's supplier is not on the supplier master"
+            )
+            raise GateError(
+                f"record is held at the door for a new supplier: "
+                f"{evidence} — the gate cannot decide it; a "
+                "controller enrols the supplier (which releases "
+                "the record into the pipeline) or refuses the "
+                "document as not a known supplier"
             )
         if record.status != "AWAITING_APPROVER":
             raise GateError(
@@ -383,6 +411,251 @@ class ApService:
                     f"{record.status}, the state its own match earned"
                 ),
             })
+        record.updated_at = _now()
+        return self.store.save(record)
+
+    # -- the new-supplier door -----------------------------------
+
+    def new_supplier_review(self) -> NewSupplierReview:
+        """The review queue: every record currently held at the
+        door, grouped by the identity it stated (enrolment.py).
+        A read over the store: building it writes nothing, and
+        a group leaves the queue when its last held record is
+        enrolled into the pipeline or refused."""
+        return build_review_queue(self.store.list())
+
+    def enrol_new_supplier(
+        self,
+        record_id: str,
+        actor: str,
+        bank_account: str,
+        bank_name: str = "",
+        source: str = "",
+        supplier_id: str | None = None,
+    ) -> Enrolment:
+        """Enrol the supplier one held record arrived from:
+        create its master record and release every held record
+        of that identity back into the pipeline.
+
+        Enrolment IS a bank-details recording — the new payee's
+        details enter the master by this act and no other — so
+        it carries the bankmaster governance whole (the
+        refusals mirror ``record_bank_version``'s, by name): a
+        named controller, the details themselves, and the
+        source they were verified FROM — the onboarding pack,
+        the verified callback, the evidence a human checked.
+        An enrolment without any of the three is refused: an
+        unattributed first payee is exactly the fraud pattern,
+        wearing a master's clothes.
+
+        The identity is the documents' own: the name as the
+        held records wrote it, and the currency of the record
+        the controller acted on. The id is the next free
+        ``SUP-<n>`` unless the controller states one — the
+        buyer's ERP often assigned the vendor number when it
+        raised the supplier's first purchase order, before AP
+        enrolled the payee, and the orders on file name that
+        id; a stated id that is already on the master is
+        refused, because enrolment creates exactly one record
+        and never merges into a standing one.
+
+        The act is whole or nothing: every check runs before
+        the master is written, and only then are the records
+        released — each through the pipeline's own adjudication
+        under the enrolled supplier, so a released record is
+        screened, watched, and matched exactly as it would
+        have been had the master carried its supplier when it
+        arrived. Enrolment adjudicates nobody's document
+        clean: a released invoice whose stated details differ
+        from the enrolled ones lands on FRAUD_REVIEW by the
+        ordinary rule. The hold's resolution rides every
+        released record permanently."""
+        if not actor or not actor.strip():
+            raise MasterError(
+                "enrolling a supplier must name the controller "
+                "who enrols it — a new payee with no name on its "
+                "enrolment is not a master record, it is a rumour"
+            )
+        if not source or not source.strip():
+            raise MasterError(
+                "enrolling a supplier must state what its bank "
+                "details were verified from — enrolment is a "
+                "bank-details recording, the details are verified "
+                "out of band, and the source is the record of "
+                "that verification (the onboarding pack, the "
+                "verified callback); without it the enrolment "
+                "is unprovenanced and refused"
+            )
+        if not bank_account or not bank_account.strip():
+            raise MasterError(
+                "enrolling a supplier must state the bank "
+                "account — the master never holds an empty "
+                "account, and a first payee least of all"
+            )
+        record = self.get_record(record_id)
+        if record.status != "NEW_SUPPLIER_REVIEW" \
+                or record.supplier_hold is None:
+            prior = (
+                record.supplier_hold.resolution
+                if record.supplier_hold is not None else None
+            )
+            prior_text = (
+                f" — its hold was resolved {prior.action} by "
+                f"{prior.actor} at {prior.at}"
+                if prior is not None else ""
+            )
+            raise GateError(
+                f"record {record_id} is {record.status}; only a "
+                f"NEW_SUPPLIER_REVIEW record's supplier can be "
+                f"enrolled{prior_text}"
+            )
+        hold = record.supplier_hold
+        name = hold.name_as_written.strip()
+        if not name:
+            raise MasterError(
+                f"record {record_id} names no supplier — there "
+                "is no identity to enrol; refuse the document, "
+                "or have the supplier resubmit naming itself"
+            )
+        if self.store.reference.supplier_named(name) is not None:
+            raise MasterError(
+                f"a supplier named {name!r} already stands on "
+                "the master — enrolment creates a new record; "
+                "it never merges a held identity into a standing "
+                "one"
+            )
+        if supplier_id is not None:
+            supplier_id = supplier_id.strip()
+            if not supplier_id:
+                raise MasterError(
+                    "a stated supplier id must not be blank — "
+                    "omit it and the master assigns the next id"
+                )
+            if supplier_id in self.store.reference.suppliers:
+                raise MasterError(
+                    f"supplier id {supplier_id} already stands "
+                    "on the master — enrolment creates exactly "
+                    "one new record and never reuses a standing "
+                    "supplier's id"
+                )
+        else:
+            supplier_id = self.store.reference.next_supplier_id()
+        group = [
+            rec for rec in self.store.list(status="NEW_SUPPLIER_REVIEW")
+            if rec.supplier_hold is not None
+            and rec.supplier_hold.normalised_name
+            == hold.normalised_name
+        ]
+        supplier = Supplier(
+            supplier_id=supplier_id,
+            name=name,
+            bank_account=bank_account.strip(),
+            bank_name=(bank_name or "").strip(),
+            currency=(
+                record.extraction.currency
+                if record.extraction is not None else "USD"
+            ),
+        )
+        version = BankVersion(
+            version=1,
+            bank_account=supplier.bank_account,
+            bank_name=supplier.bank_name,
+            effective_from="",
+            recorded_by=actor.strip(),
+            recorded_at=_now(),
+            source=source.strip(),
+        )
+        self.store.reference.enrol_supplier(supplier, version)
+        released: list[str] = []
+        for member in group:
+            member_hold = member.supplier_hold
+            assert member_hold is not None
+            member_hold.resolution = SupplierHoldResolution(
+                action="ENROLLED",
+                actor=actor.strip(),
+                detail=source.strip(),
+                supplier_id=supplier_id,
+                at=_now(),
+            )
+            member.audit.append({
+                "event": "supplier_enrolled", "at": _now(),
+                "detail": (
+                    f"supplier enrolled as {supplier_id} "
+                    f"({supplier.name}) by {actor.strip()} — bank "
+                    f"details recorded from: {source.strip()}; "
+                    "this record is released back into the "
+                    "pipeline and judged on its own contents"
+                ),
+            })
+            self.pipeline.readjudicate(member, supplier)
+            released.append(member.record_id)
+        return Enrolment(
+            supplier=supplier, bank_version=version,
+            released_record_ids=released,
+        )
+
+    def refuse_new_supplier(
+        self, record_id: str, actor: str, reason: str = ""
+    ) -> DocumentRecord:
+        """Refuse one held document as not a known supplier.
+
+        The door's other exit, and deliberately per record:
+        enrolment answers for an identity, but refusal answers
+        for THIS document — a supplier's genuine first invoice
+        is not condemned because a second document under its
+        name was refused, and its other held records stay held
+        for their own decision. The refusal is terminal and
+        reasoned (a named controller, a stated reason — the
+        duplicate-hold discipline), the record is retained
+        read-only, and the resolution rides it permanently
+        beside the hold that stopped it. Nothing is enrolled
+        by a refusal: no master record, no bank version."""
+        if not actor or not actor.strip():
+            raise GateError(
+                "refusing a held document must name its controller"
+            )
+        if not reason or not reason.strip():
+            raise GateError(
+                "refusing a held document requires a reason — "
+                "it is the answer the sender gets, and the "
+                "evidence the next arrival under this name "
+                "will be read against"
+            )
+        record = self.get_record(record_id)
+        if record.status != "NEW_SUPPLIER_REVIEW" \
+                or record.supplier_hold is None:
+            prior = (
+                record.supplier_hold.resolution
+                if record.supplier_hold is not None else None
+            )
+            prior_text = (
+                f" — its hold was resolved {prior.action} by "
+                f"{prior.actor} at {prior.at}"
+                if prior is not None else ""
+            )
+            raise GateError(
+                f"record {record_id} is {record.status}; only a "
+                f"NEW_SUPPLIER_REVIEW record can be refused at "
+                f"the door{prior_text}"
+            )
+        hold = record.supplier_hold
+        hold.resolution = SupplierHoldResolution(
+            action="REFUSED", actor=actor, detail=reason, at=_now(),
+        )
+        record.status = "REFUSED"
+        record.refusal_reason = (
+            f"NOT_A_KNOWN_SUPPLIER: supplier "
+            f"{hold.name_as_written!r} is not on the supplier "
+            f"master and enrolment was refused by {actor}: "
+            f"{reason}"
+        )
+        record.audit.append({
+            "event": "new_supplier_refused", "at": _now(),
+            "detail": (
+                f"refused as not a known supplier by {actor} — "
+                f"{reason}"
+            ),
+        })
         record.updated_at = _now()
         return self.store.save(record)
 

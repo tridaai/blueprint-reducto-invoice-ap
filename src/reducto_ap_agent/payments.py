@@ -194,6 +194,23 @@ def _refusal(
                 "a held duplicate never rides a run"
             ),
         )
+    if record.status == "NEW_SUPPLIER_REVIEW":
+        hold = record.supplier_hold
+        return PaymentRefusal(
+            record_id=rid, code="NEW_SUPPLIER_HOLD",
+            reason=(
+                "held at the door for a new supplier: "
+                + (f"supplier {hold.name_as_written!r} is not on "
+                   "the supplier master"
+                   if hold is not None else
+                   "the record's supplier is not on the supplier "
+                   "master")
+                + " — a payee nobody has enrolled is not a "
+                "payable; a controller enrols the supplier or "
+                "refuses the document, and a held record never "
+                "rides a run"
+            ),
+        )
     if record.status != "APPROVED":
         return PaymentRefusal(
             record_id=rid, code="NOT_APPROVED",
