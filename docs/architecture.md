@@ -540,13 +540,96 @@ and final. Flagging back does not edit the confirmation; the
 breaks stay on record exactly as classified, and the note
 says what happens next.
 
+**The unmatched pile.** Held advices used to end the story:
+undecidable, unplaced, a report nobody could act on. The
+worklist (`worklist.py`) computes what each held advice
+might answer. The candidate universe is precise — lines of
+`RELEASED` runs minus the (run, member) pairs some
+confirmation has already classified `paid_as_proposed`:
+settled money is never suggested twice, while short, over,
+and missing lines stay in the universe, because a second
+advice answering for them is exactly the pile's business.
+For each advice line, each universe line yields at most one
+candidate — the strongest rule that applies, evaluated in a
+fixed order and stated in `WorklistPolicy` (`policy.py`):
+`exact_line` (normalised reference equal, amount equal),
+`reference_near` (Levenshtein distance exactly ≤ 1 over the
+strip/upper-normalised strings — the duplicate watch's
+normalisation idiom — with the amount equal), `exact_amount`
+(amount equal, reference unrelated), `near_amount`
+(reference equal or near, amount within the policy's 5.00
+band and not exact; the delta rides the candidate, signed).
+Combined candidates are computed separately: subsets of
+2–4 universe lines of one run, one supplier, the advice
+line's currency, summing exactly to the advice line, in
+deterministic (record-id) order, capped per line. Currency
+must agree for every rule — cross-currency money is round
+4's own break, never a suggestion. The report ranks entries
+by best-candidate strength (exact 100, reference-near 90,
+combined 80, exact-amount 70, near 50) and prints the
+ranking rule and the policy numbers, because the pile is
+worked by a person who should be able to audit the
+arithmetic. A candidate is a read-model value: computing
+the worklist writes nothing, and the same run line may be
+suggested against several advices — suggestions are not
+claims.
+
+**The link act.** `link_confirmation` is the pile's exit,
+and it is deliberately not a smarter matcher. The controller
+names the run and pairs advice lines with members — from a
+candidate, or by hand (`rule="manual"` records which). The
+service validates the pairing as an act, not a match: one
+run per act; members belong to that released run; no member
+or advice line pairs twice; no member is already settled
+exactly for that run; a multi-member pairing spans one
+supplier and one currency and sums exactly to its advice
+line — any other lump is refused with both figures, the
+difference, and the remedy, because the classification
+machinery has no honest way to split one bank line across
+members it does not cover in full. Classification itself is
+`reconcile_linked_confirmation` in `confirmations.py`: the
+controller's pairing stands in for the number match, and
+everything else is the exact rule above — a single member
+classifies exact/short/over (a currency break short by the
+full proposal), combined members settle in full, unpaired
+advice lines are `unexpected_line`, unpaired members
+`missing`, and the summary arithmetic is the *same*
+function the named-run path uses (extracted, not copied),
+so a linked confirmation cannot make its own sums look
+right either. The new confirmation carries `linked_by`,
+`linked_rule`, and `linked_from`; the held record is never
+rewritten — it gains a `linked` audit entry and leaves the
+worklist by derivation (a confirmation exists with
+`linked_from` pointing at it), so the pile's state is always
+recomputable from the records. Overlays are written through
+the same service helper as the named-run path. The linked
+confirmation ends at the same controller gate; the
+supplier ledger needs no change, because it reads the
+member overlays the link writes.
+
+**The not-ours mark.** The pile's other exit is a refusal
+of the premise: `mark_advice_not_ours` stamps the held
+confirmation `NOT_OURS` with a `NotOursMark` (actor, reason,
+timestamp). It is terminal and named — a marked confirmation
+can be neither linked nor decided, and the mark's reason is
+what the next person reads. No migration was needed for any
+of this round: confirmations are JSONB payloads, so the new
+fields, the new status value, and the mark are payload
+evolution, and the worklist itself is a pure read model.
+
 Surfaces: `POST /remittances/{record_id}/confirm`,
+`GET /confirmations/worklist`,
+`POST /confirmations/{id}/link`,
+`POST /confirmations/{id}/not-ours`,
 `GET /confirmations[?run_id=]`, `GET /confirmations/{id}`,
 `POST /confirmations/{id}/decision`, the console's
 remittance-confirmation panel (advices with their named run,
 per-run lines with proposed beside paid, the summary,
-controller controls), and the CLI's `confirm` /
-`confirmations` commands.
+controller controls, plus the worklist section under it —
+held advices ranked, candidates with their rules and
+figures, link and not-ours controls), and the CLI's
+`confirm` / `confirmations` / `worklist` /
+`link-confirmation` / `not-ours` commands.
 
 ## The AP position
 

@@ -343,6 +343,85 @@ confirmation is the discipline of answering it:
   unmatched advice cannot be decided — there is nothing to
   accept until it answers a run.
 
+## The unmatched-advice worklist
+
+A held advice is still the bank reporting money that left.
+The pile is worked — and working it is detective work: the
+reference has a typo, one lump pays two lines, the amount is
+three units under the line it answers. `worklist.py` does
+that arithmetic in code, and leaves the judgement to a
+person:
+
+- **Candidates, computed — never conclusions.** For every
+  held advice, each paid line is compared against the
+  *confirmable universe*: the lines of released runs that no
+  confirmation has settled exactly (`paid_as_proposed`) for
+  that run. Settled money is never suggested twice. Each
+  comparison yields at most one single-line candidate, under
+  the strongest rule that applies — the rules and their
+  numbers live in one place (`WorklistPolicy` in
+  `policy.py`) and print on the report: `exact_line` (the
+  reference names the line and the amount agrees to the
+  cent — the round-4 match, missed only because the advice
+  named no usable run), `reference_near` (the reference,
+  under the house normalisation — strip, upper — is one edit
+  from the line's number, amount exact), `exact_amount`
+  (amount exact, reference unrelated), `near_amount` (the
+  reference names the line and the amount is within a stated
+  5.00 but not exact — suggested, labelled near, never
+  presented as a match). A `combined_sum` candidate stands
+  apart: one advice line whose amount is the exact sum of
+  2–4 unsettled lines of one run, one supplier, one
+  currency. Every candidate carries its rule, its strength,
+  and its numbers — the human sees *why*.
+- **Suggestions confirm nothing.** A run line may be
+  suggested against several advices at once — suggestions
+  are not claims. An advice with a perfect candidate sits
+  in the pile, unconfirmed, until a controller acts; the
+  eval pack pins the pile and every overlay standing
+  untouched under repeated worklist reads. Entries rank by
+  best-candidate strength, strongest first, no-candidate
+  advices last in the order they were held — the ranking
+  rule prints on the report.
+- **The link is a human act.** A named controller ties a
+  held advice to one released run, pairing advice lines
+  with run members — following a candidate, or choosing
+  lines directly (the suggestion is advice, not a cage).
+  The pairing may be the controller's own (`manual`) or
+  carry the candidate rule it came from; either way the new
+  confirmation is *built by the link*, stamped with who
+  linked it, under which rule, and from which held record,
+  and the held record itself is never rewritten into a
+  matched one. Classification then runs under the exact
+  rule above, with the pairing standing in for the number
+  match: a single member classifies exact, short, or over on
+  the money as it stands; a combined lump settles only when
+  it equals the members' total to the cent — any other lump
+  is refused by name, with the figures and the remedy (link
+  it against a single member, where it classifies short or
+  over, or hold for a corrected advice). Members already
+  settled exactly are refused by name; unpaired advice
+  lines are `unexpected_line`, unpaired members `missing`,
+  exactly as the named-run path leaves them. The linked
+  confirmation ends at the same controller gate.
+- **Not ours is also an answer.** A named controller may
+  mark a held advice `NOT_OURS` with a reason — the bank
+  attached another customer's advice, the payment belongs
+  to another company's batch. The mark closes the worklist
+  item and stays on the record; a marked advice can be
+  neither linked nor decided. The pile keeps what nobody
+  has judged, and only what somebody has judged leaves it.
+
+Surfaces: `GET /confirmations/worklist`,
+`POST /confirmations/{id}/link`,
+`POST /confirmations/{id}/not-ours`, the `worklist`,
+`link-confirmation`, and `not-ours` CLI verbs, and a
+worklist section under Remittance confirmation in the
+console. The supplier ledger is untouched by this round: it
+reads the member records' confirmation overlays, and a
+linked confirmation writes those overlays through the same
+path as any other — the ledger simply sees the answer.
+
 ## The AP position at close
 
 The packet answers "what would we pay next". The close asks a
@@ -811,6 +890,18 @@ gates on it:
   run or a run not on file must be held unmatched with their
   reasons; and the run, its export, and its members'
   approvals must be byte-identical afterwards.
+- **Unmatched-advice worklist** — over four held advices
+  against one released run: a reference one edit from a line
+  at its exact amount must top the candidates under the
+  reference rule; a lump equal to two lines' sum must draw
+  the combined candidate; an amount 3.00 under a named line
+  must be suggested near and labelled near; an advice for
+  another company's money must draw nothing; the suggestions
+  must confirm nothing until a controller links; the typo
+  and lump links must settle their lines exactly; the near
+  link must classify its line short by exactly the
+  difference; and the foreign advice must leave the pile
+  under a not-ours mark with its reason.
 - **AP position** — bucket placement must be exact including
   the boundary days; an undated invoice must be named
   `UNDATED`; the aged total must tie to the packet's open
@@ -890,6 +981,7 @@ src/reducto_ap_agent/
   reconciliation.py statement vs AP records, line by line, in code
   payments.py      run assembly, the refusals, the bank export, in code
   confirmations.py remittance vs the released run, line by line, in code
+  worklist.py      the unmatched pile: candidates in code, links by a human
   position.py      the AP position at close: ageing + the tie-out, in code
   coverage.py      PO coverage: cumulative billed per order, against its total
   bankmaster.py    the master's bank versions: effective-dated, provenance-stamped
