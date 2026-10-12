@@ -767,6 +767,7 @@ ConfirmClass = Literal[
 
 ConfirmStatus = Literal[
     "UNMATCHED", "AWAITING_CONTROLLER", "ACCEPTED", "FLAGGED_BACK",
+    "NOT_OURS",
 ]
 
 
@@ -1044,6 +1045,18 @@ class ConfirmationTotals(BaseModel):
     unexpected_paid: float = 0.0
 
 
+class NotOursMark(BaseModel):
+    """A controller's word that a held advice is not this
+    company's money to work: the payment belongs to another
+    company's batch, or the bank sent another customer's
+    advice. The mark closes the worklist item; the advice and
+    its held confirmation stay on record with the reason."""
+
+    actor: str
+    reason: str
+    at: str = ""
+
+
 class PaymentConfirmation(BaseModel):
     """A stored reconciliation of one remittance advice against
     the payment run it answers: every member classified, the
@@ -1057,7 +1070,13 @@ class PaymentConfirmation(BaseModel):
     An advice that names no run on file (or no run at all) is
     held ``UNMATCHED`` with the reason on the record: it is
     never guessed onto a run, and there is nothing for a
-    controller to decide until it is tied to one."""
+    controller to decide until it is tied to one. The tie, when
+    it comes, is a human act from the worklist (worklist.py):
+    a NEW confirmation is built against the run the controller
+    names, carrying ``linked_by`` / ``linked_rule`` /
+    ``linked_from`` — the held record itself is never rewritten
+    into a matched one. A held advice a controller marks
+    NOT_OURS closes with the mark on this record instead."""
 
     confirmation_id: str
     advice_record_id: str
@@ -1072,9 +1091,94 @@ class PaymentConfirmation(BaseModel):
     flags: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     decision: ControllerDecision | None = None
+    # The worklist link, when this confirmation exists because
+    # a controller tied a held advice to a run by hand: who
+    # linked it, under which candidate rule (or "manual" when
+    # the lines were the controller's own choice), and the
+    # held confirmation it was linked from.
+    linked_by: str = ""
+    linked_rule: str = ""
+    linked_from: str | None = None
+    not_ours: NotOursMark | None = None
     audit: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+
+
+WorklistRule = Literal[
+    "exact_line", "reference_near", "combined_sum",
+    "exact_amount", "near_amount", "manual",
+]
+
+
+class WorklistCandidate(BaseModel):
+    """One suggested link between one advice line and one or
+    more unsettled lines of one released run (worklist.py):
+    the rule that produced it, its strength under the printed
+    ranking, and the numbers — so the controller sees WHY it
+    is suggested before deciding anything. A suggestion is
+    not a claim: the same run line may be suggested against
+    several advices, and nothing is confirmed until a
+    controller links."""
+
+    rule: WorklistRule
+    strength: int = 0
+    run_id: str
+    member_record_ids: list[str] = Field(default_factory=list)
+    member_invoice_numbers: list[str] = Field(default_factory=list)
+    member_amounts: list[float] = Field(default_factory=list)
+    member_total: float = 0.0
+    advice_amount: float = 0.0
+    currency: str = "USD"
+    # paid − proposed for single-line candidates; None when
+    # the two sides are equal or not comparable singly (a
+    # combined candidate's sides agree in sum by construction).
+    delta: float | None = None
+    note: str = ""
+
+
+class WorklistAdviceLine(BaseModel):
+    """One paid line of a held advice, as the bank wrote it,
+    with the candidate links computed for it."""
+
+    index: int = 0
+    invoice_number: str = ""
+    amount_paid: float = 0.0
+    currency: str = "USD"
+    value_date: str = ""
+    bank_reference: str = ""
+    candidates: list[WorklistCandidate] = Field(default_factory=list)
+
+
+class WorklistEntry(BaseModel):
+    """One held advice on the worklist: the held confirmation,
+    why it was held, its lines as written, and every candidate
+    the arithmetic found. An entry with no candidates is
+    still an entry — the pile is the whole truth, ranked."""
+
+    confirmation_id: str
+    advice_record_id: str
+    submission_id: str
+    unmatched_reason: str = ""
+    advice_lines: list[WorklistAdviceLine] = Field(default_factory=list)
+    best_strength: int = 0
+    created_at: str = ""
+
+
+class AdviceWorklist(BaseModel):
+    """The unmatched-advice worklist (worklist.py): every held
+    advice not yet linked and not marked not-ours, ranked by
+    its best candidate's strength (strongest first; an advice
+    with no candidate stands last, in the order it was held),
+    with the candidate rules and the ranking printed on the
+    report — the arithmetic is inspectable, and it confirms
+    nothing by itself."""
+
+    entries: list[WorklistEntry] = Field(default_factory=list)
+    ranking_rule: str = ""
+    near_amount_abs: float = 0.0
+    reference_max_edits: int = 0
+    combined_max_lines: int = 0
 
 
 class CoverageLine(BaseModel):

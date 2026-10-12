@@ -95,6 +95,63 @@ class CoveragePolicy:
 
 DEFAULT_COVERAGE = CoveragePolicy()
 
+
+@dataclass(frozen=True)
+class WorklistPolicy:
+    """The candidate rules for the unmatched-advice worklist
+    (worklist.py): how an advice line that round 4 could not
+    place may be SUGGESTED against a released run's unsettled
+    lines. Suggestions are arithmetic, not judgement — a
+    controller links, or does not — so the rules are stated
+    here, in one place, and printed on the worklist itself.
+
+    A single-line candidate is the strongest applicable rule
+    for the (advice line, run line) pair:
+
+    - ``exact_line`` — the reference normalises to the line's
+      invoice number AND the amount agrees to the cent: the
+      round-4 match, missed only because the advice named no
+      run this confirmation could use.
+    - ``reference_near`` — the normalised reference is one edit
+      (one substitution, insertion, or deletion) from the
+      line's number AND the amount agrees to the cent.
+    - ``exact_amount`` — the amount agrees to the cent and the
+      reference bears no relation to the line's number.
+    - ``near_amount`` — the reference names the line (exactly,
+      or one edit away) and the amount is within
+      ``near_amount_abs`` of the line's amount but NOT exact.
+      A near amount with an unrelated reference is not
+      evidence and suggests nothing.
+
+    A ``combined_sum`` candidate stands apart: one advice line
+    whose amount is the exact sum of 2..``combined_max_lines``
+    unsettled lines of one run, one supplier, one currency —
+    the bank paid a batch in one lump.
+
+    Every rule requires the advice line's currency to equal
+    the run line's: money in another currency is a different
+    break (round 4's own vocabulary), never a suggestion.
+    """
+
+    # |advice amount − line amount| at or under this (and not
+    # zero) is a near miss worth suggesting, when the
+    # reference names the line.
+    near_amount_abs: float = 5.00
+    # Edits allowed between the advice's reference, normalised
+    # (strip, upper — the house idiom), and a line's invoice
+    # number for the reference to count as NEAR.
+    reference_max_edits: int = 1
+    # A combined candidate covers at most this many run lines.
+    combined_max_lines: int = 4
+    # At most this many combined candidates per advice line —
+    # the pile is worked by a person, not scrolled forever.
+    combined_max_candidates: int = 3
+    # At most this many candidates of any rule per advice line.
+    candidates_per_line: int = 8
+
+
+DEFAULT_WORKLIST = WorklistPolicy()
+
 # The ageing bucket names, in report order. UNDATED is not an
 # age; it sits last so a reader's eye lands on it after the
 # dated money, the way a controller scans a subledger.
