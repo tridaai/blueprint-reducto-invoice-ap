@@ -67,12 +67,20 @@ the supplier's page. This module is that page, as a read model:
   on, the resolution — and the index counts a supplier's
   standing holds on its row. The ledger reads the hold off
   the record; it computes nothing about duplicates itself.
+- **Each invoice shows its order's coverage state.** The
+  purchase order the invoice names, and that order's
+  coverage state, read out of the coverage view built over
+  the same records (coverage.py) — the way the ageing
+  bucket is read out of the position. Display only: no
+  total, tie, or figure on this page reads them, and the
+  ledger computes no coverage of its own.
 """
 
 from __future__ import annotations
 
 from datetime import date
 
+from .coverage import build_coverage, po_reference_of
 from .credits import (
     credit_amount,
     credited_invoice_number,
@@ -89,6 +97,7 @@ from .schemas import (
     LedgerCurrencyTotals,
     LedgerDocument,
     LedgerInvoice,
+    PurchaseOrder,
     Reconciliation,
     Supplier,
     SupplierIndex,
@@ -178,12 +187,22 @@ def build_ledger(
     records: list[DocumentRecord],
     recons: list[Reconciliation],
     as_of: str,
+    purchase_orders: dict[str, PurchaseOrder] | None = None,
 ) -> SupplierLedger:
     """Supplier ``supplier``'s ledger over the whole store
     snapshot. Pure: reads records and reconciliations, writes
-    nothing. ``as_of`` ages the position the totals tie to."""
+    nothing. ``as_of`` ages the position the totals tie to.
+    ``purchase_orders`` is the order register the coverage
+    states on the invoice rows are read from (coverage.py);
+    without it the rows still name their orders and carry no
+    state — the service always passes it."""
     own = [r for r in records if r.supplier_id == supplier.supplier_id]
     position = build_position(records, as_of)
+    coverage_states = (
+        {row.po_number: row.state
+         for row in build_coverage(records, purchase_orders).orders}
+        if purchase_orders is not None else {}
+    )
     aged = {
         line.record_id: line
         for row in position.suppliers for line in row.lines
@@ -206,9 +225,14 @@ def build_ledger(
         paid_total = paid_amount(record)
         open_now = open_amount(record)
         line = aged.get(record.record_id)
+        po_ref = po_reference_of(record)
         invoices.append(LedgerInvoice(
             record_id=record.record_id,
             invoice_number=_document_number(record),
+            po_reference=po_ref,
+            po_coverage_state=(
+                coverage_states.get(po_ref) if po_ref else None
+            ),
             status=record.status,
             currency=currency,
             face=face,
@@ -329,12 +353,14 @@ def build_index(
     records: list[DocumentRecord],
     recons: list[Reconciliation],
     as_of: str,
+    purchase_orders: dict[str, PurchaseOrder] | None = None,
 ) -> SupplierIndex:
     """The ledger index: every master supplier with its counts,
     and the unmatched section. Pure, like the ledger itself."""
     entries: list[SupplierIndexEntry] = []
     for supplier in sorted(suppliers, key=lambda s: s.name):
-        ledger = build_ledger(supplier, records, recons, as_of)
+        ledger = build_ledger(
+            supplier, records, recons, as_of, purchase_orders)
         counts: dict[str, int] = {}
         for doc in ledger.documents:
             counts[doc.doc_class] = counts.get(doc.doc_class, 0) + 1

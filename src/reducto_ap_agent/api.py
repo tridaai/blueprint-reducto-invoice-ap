@@ -193,6 +193,13 @@ def create_app(service: ApService | None = None) -> FastAPI:
     def get_record(record_id: str) -> dict:
         return svc().get_record(record_id).model_dump()
 
+    @app.get("/records/{record_id}/po-coverage")
+    def record_po_coverage(record_id: str) -> dict:
+        # The coverage fact for this invoice, counting itself:
+        # what the approver sees before deciding. A record
+        # naming no order has no fact — the error names why.
+        return svc().record_coverage(record_id).model_dump()
+
     @app.post("/records/{record_id}/decision")
     def decide(record_id: str, request: DecisionRequest) -> dict:
         record = svc().decide(record_id, request.decision, request.actor, request.reason)
@@ -270,6 +277,14 @@ def create_app(service: ApService | None = None) -> FastAPI:
                 "X-Export-Sha256": digest,
             },
         )
+
+    @app.get("/po-coverage")
+    def po_coverage() -> dict:
+        # Every order's cumulative approved billing against
+        # the total the order register states, ranked
+        # EXCEEDED first, UNMEASURED last. A pure read — it
+        # writes nothing and changes no match outcome.
+        return svc().po_coverage().model_dump()
 
     @app.post("/payments/runs", status_code=201)
     def create_payment_run(request: PaymentRunRequest) -> dict:

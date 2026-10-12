@@ -48,6 +48,16 @@ gate discipline:
   released from a hold becomes decidable again even though
   its submission's gate closed long before; ``decide``
   states how that decision lands.
+- PO coverage accumulates what the match cannot see: the
+  approved billing against each order, read against the
+  register's total (coverage.py). It is a read model beside
+  the position and the ledger — and one deliberate exception
+  to pure reading: when a gate decision lands on an invoice
+  whose order stands EXCEEDED counting that invoice, the
+  coverage fact is written onto the record's audit trail.
+  Coverage never blocks the gate; the record simply shows,
+  permanently, that the approver decided with the fact in
+  front of them.
 """
 
 from __future__ import annotations
@@ -77,12 +87,15 @@ from .credits import (
 from .duplicates import evidence_summary, watch_entry
 from .errors import (
     ConfirmationError,
+    CoverageError,
     CreditError,
     GateError,
     PaymentRunError,
     ReconciliationError,
     RecordNotFound,
 )
+from .coverage import build_coverage, po_reference_of
+from .coverage import record_coverage as _coverage_fact
 from .graph import ApPipeline, apply_gate_decision
 from .ledger import build_index, build_ledger
 from .payments import (
@@ -96,6 +109,7 @@ from .position import build_position, export_key_for_position, position_csv
 from .reconciliation import reconcile_statement
 from .schemas import (
     ControllerDecision,
+    CoverageReport,
     DocumentRecord,
     DuplicateHoldResolution,
     PaymentConfirmation,
@@ -104,6 +118,7 @@ from .schemas import (
     PaymentPacket,
     PaymentRun,
     PositionReport,
+    RecordCoverage,
     Reconciliation,
     SupplierIndex,
     SupplierLedger,
@@ -187,6 +202,13 @@ class ApService:
             rec.record_id for rec in self.store.list()
             if rec.submission_id == record.submission_id and rec.status == "AWAITING_APPROVER"
         ]
+        decided_before = {
+            rec.record_id
+            for rec in self.store.list()
+            if rec.submission_id == record.submission_id
+            and rec.decision is not None
+        }
+        decisions: dict[str, dict] = {}
         if all(rid in pending for rid in awaiting):
             decisions = dict(pending)
             config = {"configurable": {"thread_id": record.submission_id}}
@@ -207,7 +229,44 @@ class ApService:
                         and rec.decision is None:
                     apply_gate_decision(rec, raw, at=_now())
                     self.store.save(rec)
+        # Decisions this call landed (by either path) on
+        # invoices whose order stands EXCEEDED counting them
+        # carry the coverage fact onto the record's audit
+        # trail — the approver's context, made permanent.
+        for rid in decisions:
+            if rid in decided_before:
+                continue
+            rec = self.store.get(rid)
+            if rec is not None and rec.decision is not None:
+                self._note_coverage_at_decision(rec)
         return self.get_record(record_id)
+
+    def _note_coverage_at_decision(self, record: DocumentRecord) -> None:
+        """Write the PO coverage fact onto a just-decided
+        invoice's audit trail, when its order stands EXCEEDED
+        counting this invoice. Coverage never blocks the gate
+        (coverage.py states why — an exceeded order is a fact
+        for a human, not a fraud signal); what this write does
+        is keep the fact from evaporating with the screen the
+        approver read: the record shows the decision was taken
+        with the order's over-billing in front of them, figures
+        quoted in the fact's own sentence."""
+        if record.doc_class != "invoice" or record.extraction is None:
+            return
+        if not po_reference_of(record):
+            return
+        fact = _coverage_fact(
+            record, self.store.list(),
+            self.store.reference.purchase_orders,
+        )
+        if fact.state != "EXCEEDED":
+            return
+        record.audit.append({
+            "event": "po_coverage_at_decision", "at": _now(),
+            "detail": fact.fact,
+        })
+        record.updated_at = _now()
+        self.store.save(record)
 
     # -- the paid-duplicate watch --------------------------------
 
@@ -560,6 +619,51 @@ class ApService:
         self.pipeline.objects.put(key, data, "text/csv")
         return key, export_digest(data), data
 
+    # -- PO coverage -------------------------------------------------
+
+    def po_coverage(self) -> CoverageReport:
+        """PO coverage over the whole store (coverage.py):
+        every order's cumulative APPROVED billing against the
+        total the order register states, ranked EXCEEDED first
+        and UNMEASURED last. A read over the store and the
+        reference data — building it writes nothing, and it
+        changes no match outcome: the match is per-invoice
+        arithmetic, coverage is the accumulation beside it."""
+        return build_coverage(
+            self.store.list(), self.store.reference.purchase_orders
+        )
+
+    def record_coverage(self, record_id: str) -> RecordCoverage:
+        """The coverage fact for one invoice, counting itself —
+        what the approver's surfaces show before the gate
+        decides. A record that is not an invoice, or an invoice
+        naming no purchase order, has no coverage fact, and
+        CoverageError names why. An invoice naming an order
+        that is not on the register is NOT an error: its fact
+        reads UNMEASURED, billed sum shown, no verdict."""
+        record = self.get_record(record_id)
+        if record.doc_class != "invoice":
+            raise CoverageError(
+                f"record {record_id} is a {record.doc_class}, not an "
+                "invoice — coverage is a fact about an invoice "
+                "billing against an order"
+            )
+        if record.extraction is None:
+            raise CoverageError(
+                f"invoice {record_id} carries no captured extraction; "
+                "the order it names was never read"
+            )
+        if not po_reference_of(record):
+            raise CoverageError(
+                f"invoice {record_id} names no purchase order — "
+                "coverage measures billing against an order, and "
+                "this invoice stands outside any order"
+            )
+        return _coverage_fact(
+            record, self.store.list(),
+            self.store.reference.purchase_orders,
+        )
+
     # -- the supplier ledger -------------------------------------
 
     def supplier_index(self, as_of: str) -> SupplierIndex:
@@ -572,6 +676,7 @@ class ApService:
             self.store.list(),
             self.store.list_reconciliations(),
             as_of,
+            self.store.reference.purchase_orders,
         )
 
     def supplier_ledger(
@@ -594,6 +699,7 @@ class ApService:
             self.store.list(),
             self.store.list_reconciliations(),
             as_of,
+            self.store.reference.purchase_orders,
         )
 
     # -- payment runs ----------------------------------------------
