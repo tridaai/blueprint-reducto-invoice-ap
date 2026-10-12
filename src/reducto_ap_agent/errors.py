@@ -85,6 +85,16 @@ class CreditError(ApError):
     status_code = 422
 
 
+class CoverageError(ApError):
+    """PO coverage was asked of something it cannot speak for
+    — a record that is not an invoice, or an invoice naming no
+    purchase order. (An invoice naming an order that is not on
+    the register is NOT this error: its coverage is computed
+    and reads UNMEASURED, total unknown, billed sum shown.)"""
+
+    status_code = 422
+
+
 class PaymentRunError(ApError):
     """A payment run could not be assembled or released as asked
     — no eligible records, a member whose supplier is not on

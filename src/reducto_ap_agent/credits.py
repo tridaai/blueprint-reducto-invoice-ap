@@ -136,6 +136,24 @@ def open_amount(record: DocumentRecord) -> float:
     return _cents(face - applied - paid_amount(record))
 
 
+def billable_amount(record: DocumentRecord) -> float:
+    """What an invoice record bills against the purchase order
+    it names: its approved face minus the credits applied
+    against it — and NOT minus payments. A credit reduces the
+    bill itself (the supplier took money back off what was
+    charged); a payment only settles a bill that stands, so
+    paying an invoice, in part or in full, never un-bills it.
+    This is the figure PO coverage accumulates (coverage.py):
+    ``open_amount`` answers "what is still owed", this answers
+    "what has been charged against the order", and the two
+    differ by exactly the payments already released."""
+    if record.extraction is None:
+        return 0.0
+    face = float(record.extraction.value("total") or 0.0)
+    applied = sum(entry.amount for entry in record.credits_applied)
+    return _cents(face - applied)
+
+
 def _resolve_target(
     credit: DocumentRecord, records: list[DocumentRecord]
 ) -> tuple[DocumentRecord | None, tuple[str, str] | None]:

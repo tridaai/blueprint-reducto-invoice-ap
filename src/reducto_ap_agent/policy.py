@@ -72,6 +72,29 @@ class AgeingPolicy:
 
 DEFAULT_AGEING = AgeingPolicy()
 
+
+@dataclass(frozen=True)
+class CoveragePolicy:
+    """Thresholds for PO coverage (coverage.py): how full an
+    order may stand before the cumulative view names it.
+
+    Coverage is a percentage of the order's total, billed by
+    APPROVED invoices (face minus the credits applied against
+    them — coverage.py states the billable rule). Below
+    ``watch_pct`` an order is WITHIN; at or above it, WATCH —
+    the order is nearly consumed and the next invoice against
+    it deserves a second look. Billed past the total is
+    EXCEEDED, a comparison to the cent, never a percentage
+    judgement: 100.0% exactly is a fully billed order (WATCH),
+    not an exceeded one. The thresholds are printed on the
+    coverage report, so a reader can see which policy produced
+    a state."""
+
+    watch_pct: float = 80.0
+
+
+DEFAULT_COVERAGE = CoveragePolicy()
+
 # The ageing bucket names, in report order. UNDATED is not an
 # age; it sits last so a reader's eye lands on it after the
 # dated money, the way a controller scans a subledger.

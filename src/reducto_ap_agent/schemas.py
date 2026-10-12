@@ -188,6 +188,15 @@ PaymentConfirmationState = Literal[
     "CONFIRMED", "SHORT_PAID", "OVER_PAID", "MISSING",
 ]
 
+# A purchase order's coverage state (coverage.py): how the
+# cumulative billing of APPROVED invoices against the order
+# stands against the order's total. ``WITHIN`` below the
+# watch threshold, ``WATCH`` at or above it, ``EXCEEDED``
+# billed past the total, ``UNMEASURED`` when the order is not
+# on the register and no total exists to measure against —
+# its billed sum is still listed, under no verdict.
+CoverageState = Literal["WITHIN", "WATCH", "EXCEEDED", "UNMEASURED"]
+
 # A credit note's application state. ``UNAPPLIED``: the credit
 # is on file — extracted, matched, and (once the approver's
 # gate passes it) genuine — but no controller has applied it
@@ -764,6 +773,15 @@ class LedgerInvoice(BaseModel):
     due_date: str = ""
     bucket: PositionBucket | None = None  # the position's reading at as_of
     fully_credited: bool = False  # open exactly zero, covered by credits
+    # The purchase order this invoice names, and that order's
+    # coverage state (coverage.py), read out of the coverage
+    # view built over the same records — display only: the
+    # ledger's totals and its tie never read these fields.
+    # ``po_reference`` is "" when the invoice names no order;
+    # the state is then None, there being no order to stand
+    # in any state.
+    po_reference: str = ""
+    po_coverage_state: CoverageState | None = None
 
 
 class LedgerCredit(BaseModel):
@@ -1001,3 +1019,112 @@ class PaymentConfirmation(BaseModel):
     audit: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+
+
+class CoverageLine(BaseModel):
+    """One invoice billing against an order, in billing order
+    (coverage.py): the invoice's approved face, the credits
+    applied against it, and its BILLABLE figure — face minus
+    credits, the amount this invoice charges the order.
+    Payments are not on the line: paying an invoice settles
+    its bill, it does not shrink it, so a part-paid invoice
+    bills in full. ``cumulative_billed`` and
+    ``cumulative_pct`` are the running totals including this
+    line — the point where an order crosses a threshold is
+    visible on the line that crosses it. The pct is None
+    only when the order's total is unknown (UNMEASURED)."""
+
+    record_id: str
+    invoice_number: str = ""
+    supplier_name: str = ""
+    invoice_date: str = ""
+    face: float = 0.0
+    credits: float = 0.0  # applied credits against the face
+    billable: float = 0.0
+    cumulative_billed: float = 0.0
+    cumulative_pct: float | None = None
+
+
+class CoverageExcluded(BaseModel):
+    """An approved invoice naming this order that coverage did
+    NOT sum into it, with the reason in words — in practice a
+    currency that is not the order's: coverage never converts
+    currencies silently, so the invoice is listed here, out of
+    the billed figure, where a human can see it was seen."""
+
+    record_id: str
+    invoice_number: str = ""
+    amount: float = 0.0  # the invoice's billable figure, unsummed
+    currency: str = "USD"
+    reason: str = ""
+
+
+class OrderCoverage(BaseModel):
+    """One purchase order's coverage (coverage.py): the total
+    the order register states (``total_source`` says where it
+    came from — the register, or NOT_ON_FILE, in which case
+    ``total`` is None and no verdict exists), the cumulative
+    billed against it by APPROVED invoices, the coverage
+    percentage (None when unmeasured), and the state the
+    thresholds in policy.py name. The contributing invoices
+    ride as lines, in billing order, each with its running
+    cumulative."""
+
+    po_number: str
+    supplier_id: str | None = None
+    supplier_name: str = ""
+    currency: str = "USD"
+    total: float | None = None
+    total_source: Literal["ORDER_REGISTER", "NOT_ON_FILE"] = "ORDER_REGISTER"
+    billed: float = 0.0
+    pct: float | None = None
+    state: CoverageState = "WITHIN"
+    lines: list[CoverageLine] = Field(default_factory=list)
+    excluded: list[CoverageExcluded] = Field(default_factory=list)
+
+
+class CoverageReport(BaseModel):
+    """PO coverage over the whole store (coverage.py): every
+    order on the register plus every order an approved
+    invoice names, ranked EXCEEDED first (fullest first),
+    then WATCH, then WITHIN, UNMEASURED last — named, never
+    hidden. A read model: building it writes nothing, moves
+    no money, and changes no match outcome — the match is
+    per-invoice arithmetic and coverage is a second,
+    cumulative fact beside it."""
+
+    watch_pct: float = 80.0
+    orders: list[OrderCoverage] = Field(default_factory=list)
+    counts: dict[str, int] = Field(default_factory=dict)
+    note: str = (
+        "Billed is the sum over APPROVED invoices of face minus "
+        "applied credits; payments never reduce it — paying "
+        "settles a bill, it does not un-bill it. Coverage "
+        "informs the approver's gate; it never blocks it, and "
+        "it never rewrites a match outcome."
+    )
+
+
+class RecordCoverage(BaseModel):
+    """The coverage fact for one invoice record, COUNTING this
+    invoice: the order it names, the billed figure including
+    this record's own billable amount (whether or not it is
+    approved yet), and the state the order stands in on that
+    figure. This is what rides the approver's surfaces before
+    they decide — ``fact`` is the sentence, in the words every
+    surface quotes. ``counted`` says whether the record is
+    itself inside the billed sum already (an APPROVED record
+    is; an awaiting one is added for the reading)."""
+
+    record_id: str
+    invoice_number: str = ""
+    po_number: str
+    currency: str = "USD"
+    total: float | None = None
+    total_source: Literal["ORDER_REGISTER", "NOT_ON_FILE"] = "ORDER_REGISTER"
+    billed: float = 0.0  # approved billing, this record included if counted
+    billed_including: float = 0.0  # billed, counting this record either way
+    pct: float | None = None  # of billed_including, when a total exists
+    state: CoverageState = "WITHIN"
+    counted: bool = False
+    fact: str = ""
