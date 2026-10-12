@@ -84,6 +84,16 @@ def main(argv: list[str] | None = None) -> int:
     p_ledger = sub.add_parser("ledger", help="print one supplier's ledger (JSON): the whole relationship, totals tied to the position")
     p_ledger.add_argument("supplier_id", help="the supplier's id on the master (e.g. SUP-08)")
     p_ledger.add_argument("as_of", help="the close date, YYYY-MM-DD — the date the tied position is aged at")
+    p_bank_history = sub.add_parser("bank-history", help="print one supplier's bank timeline (JSON): every master version with its provenance, and the version in force at the as-of")
+    p_bank_history.add_argument("supplier_id", help="the supplier's id on the master (e.g. SUP-03)")
+    p_bank_history.add_argument("as_of", help="the date the timeline is read at, YYYY-MM-DD")
+    p_bank_version = sub.add_parser("record-bank-version", help="record a legitimate bank change on the supplier master: a new version, effective from a date, with its provenance")
+    p_bank_version.add_argument("supplier_id", help="the supplier's id on the master (e.g. SUP-03)")
+    p_bank_version.add_argument("--account", required=True, help="the new bank account, as the master records it")
+    p_bank_version.add_argument("--bank-name", default="", help="the new bank's name")
+    p_bank_version.add_argument("--effective-from", required=True, help="the date the new details take effect, YYYY-MM-DD")
+    p_bank_version.add_argument("--actor", required=True, help="who recorded the version")
+    p_bank_version.add_argument("--source", required=True, help="what it was recorded from — the change notice, the verified callback: the provenance")
     args = parser.parse_args(argv)
 
     service = build_service()
@@ -176,6 +186,19 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "ledger":
             print(service.supplier_ledger(
                 args.supplier_id, args.as_of).model_dump_json(indent=2))
+        elif args.command == "bank-history":
+            print(service.bank_history(
+                args.supplier_id, args.as_of).model_dump_json(indent=2))
+        elif args.command == "record-bank-version":
+            version = service.record_bank_version(
+                args.supplier_id,
+                bank_account=args.account,
+                bank_name=args.bank_name,
+                effective_from=args.effective_from,
+                actor=args.actor,
+                source=args.source,
+            )
+            print(version.model_dump_json(indent=2))
     except ApError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -171,7 +171,7 @@
 <div style="padding: 0 28px 8px;">
   <section>
     <h2>Supplier ledgers</h2>
-    <p class="note" style="margin-top:0;">One supplier, the whole relationship: every document the intake joined to them, each invoice's face, credits and open amount, the statement breaks still open against them, and bank details from the supplier master only — with a warning wherever a document disagreed with them. Totals tie to the position at the same as-of. A document that joined to no supplier is listed under Unmatched — never attached by resemblance, never dropped.</p>
+    <p class="note" style="margin-top:0;">One supplier, the whole relationship: every document the intake joined to them, each invoice's face, credits and open amount, the statement breaks still open against them, and bank details from the supplier master only — with a warning wherever a document disagreed with them. The master is versioned: the bank details shown are the version in force at the as-of, its timeline rides the ledger, and a legitimate change is recorded there with its provenance. Invoices are screened against the version in force on their own date — old details on an old invoice are clean, new details before their date are a hold. Totals tie to the position at the same as-of. A document that joined to no supplier is listed under Unmatched — never attached by resemblance, never dropped.</p>
     <div id="ledger-index" class="note">No suppliers loaded yet — load the demo world.</div>
     <div id="ledger-detail"></div>
   </section>
@@ -618,8 +618,22 @@ async function loadLedgers() {
 async function showLedger(supplierId) {
   const asOf = $("position-as-of").value || "2026-11-15";
   const l = await api("/suppliers/" + supplierId + "/ledger?as_of=" + asOf);
+  const versionWord = l.bank.effective_from ? `version ${l.bank.bank_version} of ${l.bank.bank_version_count}, effective from ${l.bank.effective_from}` : `version ${l.bank.bank_version} of ${l.bank.bank_version_count} — the seeded details, on file since before the record`;
   let html = `<h2 style="margin-top:18px;">${l.supplier_name} — the whole relationship (as of ${l.as_of})</h2>
-    <p class="note">Bank details, from the supplier master: ${l.bank.bank_name} · ${l.bank.bank_account}</p>`;
+    <p class="note">Bank details, from the supplier master: ${l.bank.bank_name} · ${l.bank.bank_account} · ${versionWord}</p>
+    <div id="bank-history"></div>
+    <details style="margin:6px 0;"><summary class="note">Record a bank change on the master</summary>
+      <p class="note">A legitimate change, verified out of band and recorded here with its provenance — it never rides in on an invoice. The version takes effect from its date; invoices are judged against the version in force on their own date, and no record already decided is re-judged.</p>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <input id="bv-account" placeholder="New bank account" size="26">
+        <input id="bv-bank-name" placeholder="Bank name" size="16">
+        <input id="bv-effective" type="date" value="2026-11-16">
+        <input id="bv-actor" placeholder="Recorded by" size="16">
+        <input id="bv-source" placeholder="Recorded from (change notice, verified callback…)" size="42">
+        <button id="bv-record" class="secondary">Record bank version</button>
+      </div>
+      <p class="note" id="bv-error"></p>
+    </details>`;
   if (l.bank.warning)
     html += `<p class="flag">⚠ Bank-change warning — ${l.bank.warning} (records: ${l.bank.flagged_record_ids.join(", ")}). Fraud is resolved in the master, out of band; the gate cannot clear it.</p>`;
   if (l.invoices.length) {
@@ -645,6 +659,29 @@ async function showLedger(supplierId) {
     `<p class="note" style="margin-top:8px;">${t.currency}: face ${money(t.face_total)} − credits ${money(t.credits_total)} = open <strong>${money(t.open_total)}</strong> · position ${money(t.position_open_total)} — ${t.tied ? "TIED" : "POSITION_TIE_BREAK"}</p>`).join("");
   html += `<p class="note">${l.note}</p>`;
   $("ledger-detail").innerHTML = html;
+  loadBankHistory(supplierId, asOf);
+  $("bv-record").addEventListener("click", async () => {
+    $("bv-error").textContent = "";
+    try {
+      await api(`/suppliers/${supplierId}/bank-versions`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          bank_account: $("bv-account").value, bank_name: $("bv-bank-name").value,
+          effective_from: $("bv-effective").value, actor: $("bv-actor").value,
+          source: $("bv-source").value,
+        }),
+      });
+      await showLedger(supplierId); await loadLedgers();
+    } catch (e) { $("bv-error").textContent = e.message; }
+  });
+}
+
+async function loadBankHistory(supplierId, asOf) {
+  const h = await api(`/suppliers/${supplierId}/bank-history?as_of=` + asOf);
+  const host = $("bank-history");
+  if (!host) return;
+  host.innerHTML = `<p class="note" style="margin:2px 0;">Bank history — ${h.versions.length} version(s) on file; version ${h.current_version} is in force at ${h.as_of}:</p>`
+    + h.versions.map(v => `<div class="note" style="margin-left:14px;">v${v.version} · ${v.bank_name || "—"} · ${v.bank_account} · ${v.effective_from ? "effective from " + v.effective_from : "the seeded details — effective before the record"}${v.version === h.current_version ? " · <strong>in force</strong>" : ""}${v.recorded_by ? ` · recorded by ${v.recorded_by} from: ${v.source}` : ` · ${v.source}`}</div>`).join("");
 }
 
 async function loadCoverage() {

@@ -82,6 +82,14 @@ class DuplicateResolutionRequest(BaseModel):
     reason: str = ""
 
 
+class BankVersionRequest(BaseModel):
+    bank_account: str
+    bank_name: str = ""
+    effective_from: str  # ISO date the details take effect
+    actor: str  # who recorded the version
+    source: str  # what it was recorded from — the provenance
+
+
 def create_app(service: ApService | None = None) -> FastAPI:
     load_dotenv()
     configure_json_logging()
@@ -361,6 +369,33 @@ def create_app(service: ApService | None = None) -> FastAPI:
     def supplier_ledger(supplier_id: str, as_of: str | None = None) -> dict:
         as_of = as_of or datetime.now(timezone.utc).date().isoformat()
         return svc().supplier_ledger(supplier_id, as_of).model_dump()
+
+    @app.get("/suppliers/{supplier_id}/bank-history")
+    def bank_history(supplier_id: str, as_of: str | None = None) -> dict:
+        # The supplier's bank timeline: every version on file
+        # with its provenance, and the version in force at the
+        # as-of named. The as-of defaults to today only as a
+        # convenience — the history states the date it was
+        # read at, like every dated read in this API.
+        as_of = as_of or datetime.now(timezone.utc).date().isoformat()
+        return svc().bank_history(supplier_id, as_of).model_dump()
+
+    @app.post("/suppliers/{supplier_id}/bank-versions", status_code=201)
+    def record_bank_version(supplier_id: str, request: BankVersionRequest) -> dict:
+        # The governed master act: a legitimate bank change,
+        # recorded with its provenance and effective date.
+        # The service refuses by name — no actor, no source,
+        # no date, a date that rewrites the past, or details
+        # identical to the standing version.
+        version = svc().record_bank_version(
+            supplier_id,
+            bank_account=request.bank_account,
+            bank_name=request.bank_name,
+            effective_from=request.effective_from,
+            actor=request.actor,
+            source=request.source,
+        )
+        return version.model_dump()
 
     return app
 
