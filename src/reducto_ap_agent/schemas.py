@@ -31,6 +31,7 @@ RecordStatus = Literal[
     "EXCEPTION",
     "FRAUD_REVIEW",
     "PAID_DUPLICATE_HOLD",
+    "NEW_SUPPLIER_REVIEW",
     "REFUSED",
 ]
 
@@ -345,6 +346,96 @@ class PaidDuplicateHold(BaseModel):
     resolution: DuplicateHoldResolution | None = None
 
 
+class SupplierHoldResolution(BaseModel):
+    """A named controller's word on a new-supplier hold.
+    ``ENROLLED``: the supplier was enrolled on the master —
+    ``supplier_id`` is the id it was enrolled under, and
+    ``detail`` is the provenance the bank details were
+    recorded from (the enrolment's source statement, the
+    bankmaster doctrine's own requirement). ``REFUSED``: the
+    document was refused as not a known supplier, and
+    ``detail`` is the controller's reason. Either way the
+    resolution rides the record permanently, beside the
+    hold that stopped it."""
+
+    action: Literal["ENROLLED", "REFUSED"]
+    actor: str
+    detail: str
+    supplier_id: str | None = None
+    at: str = ""
+
+
+class SupplierHold(BaseModel):
+    """The new-supplier hold's evidence on one arrival
+    (enrolment.py): the supplier name exactly as the document
+    wrote it, its normalised form (the intake's own key — the
+    group an enrolment resolves), and the near-miss: the
+    master supplier the name most resembles, when one stands
+    within the stated edit distance. A near-miss is evidence
+    for the controller, never a join — resemblance enrols
+    nobody, and the hold names it precisely so a misspelling
+    of a governed supplier is refused as a misspelling, not
+    enrolled as a second payee."""
+
+    name_as_written: str
+    normalised_name: str
+    near_miss_supplier_id: str | None = None
+    near_miss_supplier_name: str | None = None
+    held_at: str = ""
+    resolution: SupplierHoldResolution | None = None
+
+
+class NewSupplierGroup(BaseModel):
+    """One identity on the new-supplier review queue
+    (enrolment.py): every held record that wrote its supplier
+    as this name, grouped under the intake's own normalisation
+    — so a group is exactly what one enrolment resolves. The
+    grouping is a read model over held records; it stores
+    nothing, and enrolling or refusing writes the records,
+    never the group."""
+
+    name_as_written: str
+    normalised_name: str
+    record_ids: list[str] = Field(default_factory=list)
+    document_numbers: list[str] = Field(default_factory=list)
+    totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    held_since: str = ""  # the earliest hold in the group
+    near_miss_supplier_id: str | None = None
+    near_miss_supplier_name: str | None = None
+
+
+class NewSupplierReview(BaseModel):
+    """The new-supplier review queue (enrolment.py): every
+    payable document currently stopped at the door because
+    its supplier is not on the master, grouped by the identity
+    it stated. Two exits per group or record, both a named
+    controller's act: enrol the supplier (which releases every
+    held record of the identity back into the pipeline), or
+    refuse a record as not a known supplier."""
+
+    groups: list[NewSupplierGroup] = Field(default_factory=list)
+    held_count: int = 0
+    note: str = (
+        "A held document has not been matched and has not "
+        "been fraud-screened — there is no master record to "
+        "screen it against. It is not a payable, and no gate "
+        "can decide it. Enrolment is a bank-details recording "
+        "and carries that governance whole: a named controller, "
+        "the details, and what they were verified from."
+    )
+
+
+class Enrolment(BaseModel):
+    """The result of enrolling one new supplier (service.py):
+    the master record created, the version-1 bank record its
+    details stand as, and every held record the enrolment
+    released back into the pipeline."""
+
+    supplier: Supplier
+    bank_version: BankVersion
+    released_record_ids: list[str] = Field(default_factory=list)
+
+
 class DocumentRecord(BaseModel):
     """One processed (sub-)document and everything decided about it."""
 
@@ -393,6 +484,16 @@ class DocumentRecord(BaseModel):
     # the permanent evidence of why the document was stopped,
     # and of who let it through or confirmed it, and why.
     duplicate_hold: PaidDuplicateHold | None = None
+    # The new-supplier hold (enrolment.py). Set at intake when
+    # a payable document's supplier resolves to no master
+    # record — by neither the name it states nor the purchase
+    # order it references; the record's status is then
+    # NEW_SUPPLIER_REVIEW until a named controller enrols the
+    # supplier (releasing the record back into the pipeline)
+    # or refuses the document. The payload stays on the record
+    # after either act — the permanent evidence of why the
+    # document stopped at the door, and of who opened it.
+    supplier_hold: SupplierHold | None = None
     audit: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
@@ -601,6 +702,23 @@ class FraudHeldLine(BaseModel):
     fraud_flags: list[str] = Field(default_factory=list)
 
 
+class NewSupplierHeldLine(BaseModel):
+    """An invoice stopped at the door because its supplier is
+    not on the master, disclosed beside the position: a payee
+    nobody has enrolled is not a payable — it stands outside
+    the packet's universe (the packet reads APPROVED records
+    only) and therefore outside the tie — shown with the name
+    exactly as the document wrote it, so the close sees the
+    money that is waiting on an enrolment decision."""
+
+    record_id: str
+    supplier_name: str = ""  # as the document wrote it — no master name exists
+    invoice_number: str = ""
+    currency: str = "USD"
+    face: float = 0.0
+    open: float = 0.0
+
+
 class FullyCreditedLine(BaseModel):
     """An APPROVED invoice whose applied credits bring its open
     amount to exactly zero. It owes nothing and ages nothing;
@@ -666,13 +784,17 @@ class PositionReport(BaseModel):
     tie_status: TieStatus = "TIED"
     fraud_held: list[FraudHeldLine] = Field(default_factory=list)
     fraud_held_totals_by_currency: dict[str, float] = Field(default_factory=dict)
+    new_supplier_held: list[NewSupplierHeldLine] = Field(default_factory=list)
+    new_supplier_held_totals_by_currency: dict[str, float] = Field(
+        default_factory=dict)
     fully_credited: list[FullyCreditedLine] = Field(default_factory=list)
     fully_paid: list[FullyPaidLine] = Field(default_factory=list)
     anomalies: list[PositionAnomaly] = Field(default_factory=list)
     splits_agree: bool = True  # bucket split and state split both foot to the open totals
     note: str = (
         "Ageing runs off due dates as of the stated date. Fraud-held "
-        "money is disclosed beside the position, outside the tie."
+        "money and money held at the door for an unenrolled supplier "
+        "are disclosed beside the position, outside the tie."
     )
 
 
@@ -993,6 +1115,11 @@ class SupplierIndex(BaseModel):
     suppliers: list[SupplierIndexEntry] = Field(default_factory=list)
     unmatched_count: int = 0
     unmatched: list[UnmatchedDocument] = Field(default_factory=list)
+    # Of the unmatched documents, how many are currently
+    # stopped at the door in NEW_SUPPLIER_REVIEW — the subset
+    # awaiting a controller's enrol-or-refuse word, as opposed
+    # to documents that were decided and simply joined nowhere.
+    new_supplier_hold_count: int = 0
     note: str = (
         "Documents join a supplier by the intake's own discipline: "
         "the extracted supplier name, matched exactly against the "

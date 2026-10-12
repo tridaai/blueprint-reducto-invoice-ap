@@ -42,12 +42,15 @@ from .schemas import (
 class ReferenceData:
     """Suppliers, POs, receipts — read-only for the pipeline.
 
-    One governed exception to the reading: a supplier's bank
-    versions (bankmaster.py). The master itself is reference
-    data, so its history lives here too — seeded with version
-    1 per supplier at load, and extended only by the service's
-    named recording act, which appends. Nothing anywhere
-    edits or removes a version once it stands."""
+    Two governed exceptions to the reading, both the
+    service's named acts: a supplier's bank versions
+    (bankmaster.py) — the master itself is reference data, so
+    its history lives here too, seeded with version 1 per
+    supplier at load and extended only by the recording act,
+    which appends — and enrolment (enrolment.py), which adds
+    a supplier the master never carried, its details standing
+    as version 1 of a new series. Nothing anywhere edits or
+    removes a supplier or a version once it stands."""
 
     def __init__(self) -> None:
         self.suppliers: dict[str, Supplier] = {}
@@ -88,6 +91,43 @@ class ReferenceData:
         Append is the only write the series ever takes."""
         self.bank_versions[supplier_id].append(version)
         return version
+
+    def next_supplier_id(self) -> str:
+        """The next free ``SUP-<n>`` id: one past the highest
+        numeric suffix on the master, skipping any collision.
+        A controller may instead state the id at enrolment —
+        the buyer's ERP often assigned the vendor number when
+        it raised the supplier's first purchase order, before
+        AP ever enrolled the payee — and the service validates
+        that choice against this same dict."""
+        highest = 0
+        for supplier_id in self.suppliers:
+            head, _, tail = supplier_id.rpartition("-")
+            if head == "SUP" and tail.isdigit():
+                highest = max(highest, int(tail))
+        n = highest + 1
+        while f"SUP-{n:02d}" in self.suppliers:
+            n += 1
+        return f"SUP-{n:02d}"
+
+    def enrol_supplier(
+        self, supplier: Supplier, version: BankVersion
+    ) -> Supplier:
+        """Add one supplier to the master, with its bank
+        details standing as the version-1 record the service
+        built for the enrolment. The second governed exception
+        to this surface's reading (the first is
+        ``record_bank_version``): enrolment is the service's
+        named act, validated there whole before it arrives
+        here — identity, details, and provenance together, or
+        not at all. Nothing here edits an existing supplier:
+        the id is new by the service's checks, so enrolment
+        writes exactly one master record and its one version,
+        and every standing supplier and series is untouched."""
+        self.suppliers[supplier.supplier_id] = supplier
+        self.suppliers_by_name[supplier.name.strip().lower()] = supplier
+        self.bank_versions[supplier.supplier_id] = [version]
+        return supplier
 
 
 class InMemoryRecordStore:
