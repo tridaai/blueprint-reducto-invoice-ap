@@ -95,6 +95,12 @@
     "ranking_worst_first_unmeasured_last": true,
     "crossing_informs_never_blocks": true
   },
+  "bank_history": {
+    "timeline_and_provenance": true,
+    "screen_outcomes_as_of_invoice_date": true,
+    "decided_records_and_history_stand": true,
+    "readers_carry_the_version": true
+  },
   "failures": [],
   "gates": {
     "match_decision_accuracy == 1.0": true,
@@ -141,7 +147,11 @@
     "coverage_unapproved_excluded_unmeasured_listed": true,
     "coverage_record_fact_counts_the_invoice": true,
     "coverage_ranking_worst_first_unmeasured_last": true,
-    "coverage_crossing_informs_never_blocks": true
+    "coverage_crossing_informs_never_blocks": true,
+    "bank_history_timeline_and_provenance": true,
+    "bank_history_screen_outcomes_as_of_invoice_date": true,
+    "bank_history_decided_records_and_history_stand": true,
+    "bank_history_readers_carry_the_version": true
   },
   "gate_passed": true
 }

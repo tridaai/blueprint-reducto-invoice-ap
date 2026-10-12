@@ -100,6 +100,22 @@ Gates (a failure exits non-zero):
   600.00 — stands EXCEEDED at 200.0%, the second invoice's
   approval unblocked, its match untouched, and its record
   carrying the decision-time coverage note.
+- bank history — the master has a past, on its own planted
+  service: a legitimate Cedarline bank change is recorded
+  with its provenance, effective 2026-10-01, and invoices are
+  judged as of their own dates — the old bank on a September
+  invoice is clean, the old bank on an October invoice is
+  held SUPERSEDED, the new bank on a September invoice is
+  held NOT_YET_EFFECTIVE, an account no version ever held is
+  held CHANGED, and the new bank on an October invoice is
+  clean; a recording without an actor, without a source,
+  without a date, or with a date that rewinds the series is
+  refused by name; the seed and every earlier version stand
+  byte-identical under later recordings; a record decided
+  under the old master keeps its stamped outcome when a new
+  version lands; the ledger shows the version in force at
+  its as-of, and a released run pays the version in force on
+  the day of release.
 - paid-duplicate watch — the duplicate that arrives second:
   on the main service, an invoice released in a run is
   re-submitted verbatim and held on the paid evidence (run,
@@ -134,7 +150,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from reducto_ap_agent.credits import open_amount  # noqa: E402
 from reducto_ap_agent.datasets import _doc, _inv_fields, build_world, remittance_advice_doc  # noqa: E402
-from reducto_ap_agent.errors import GateError  # noqa: E402
+from reducto_ap_agent.errors import GateError, MasterError  # noqa: E402
 from reducto_ap_agent.graph import ApPipeline  # noqa: E402
 from reducto_ap_agent.object_store import InMemoryObjectStore  # noqa: E402
 from reducto_ap_agent.offline_docs import OfflineDocumentAdapter  # noqa: E402
@@ -1398,6 +1414,164 @@ def evaluate(service: ApService) -> dict:
         "crossing_informs_never_blocks": crossing_informs,
     }
 
+    # -- bank history ----------------------------------------
+    # The master has a past, on its own planted service (the
+    # position scenario's idiom): Cedarline changes banks
+    # legitimately — a change notice, verified out of band,
+    # recorded effective 2026-10-01. Invoices are then judged
+    # as of their own dates against the version in force
+    # then, never against the master's present word alone.
+    bank_service = build_offline_service()
+    OLD_BANK = "US00 CEDR 2222 3333 4444"
+    NEW_BANK = "US00 CEDR 9999 8888 7777"
+    BANK_SOURCE = ("supplier letter dated 2026-09-25, verified by "
+                   "callback to the number on file")
+
+    def bank_refusal(**overrides):
+        call = dict(
+            bank_account=NEW_BANK, bank_name="Cedar Bank",
+            effective_from="2026-10-01", actor="Eval Controller",
+            source=BANK_SOURCE,
+        )
+        call.update(overrides)
+        try:
+            bank_service.record_bank_version("SUP-03", **call)
+        except MasterError as exc:
+            return str(exc)
+        return ""
+
+    provenance_refusals = (
+        "must name who recorded" in bank_refusal(actor=" ")
+        and "recorded from" in bank_refusal(source="")
+        and "must state the date" in bank_refusal(effective_from="")
+        and len(bank_service.store.reference.bank_versions_for(
+            "SUP-03")) == 1  # the refusals appended nothing
+    )
+    recorded = bank_service.record_bank_version(
+        "SUP-03", bank_account=NEW_BANK, bank_name="Cedar Bank",
+        effective_from="2026-10-01", actor="Eval Controller",
+        source=BANK_SOURCE,
+    )
+    rewinding_refused = "does not move" in bank_refusal(
+        bank_account="US00 CEDR 5555 6666 7777",
+        effective_from="2026-09-01")
+    history_early = bank_service.bank_history("SUP-03", "2026-09-15")
+    history_late = bank_service.bank_history("SUP-03", "2026-11-15")
+    timeline_holds = (
+        provenance_refusals and rewinding_refused
+        and recorded.version == 2
+        and [v.version for v in history_late.versions] == [1, 2]
+        and history_late.versions[0].effective_from == ""
+        and history_late.versions[1].recorded_by == "Eval Controller"
+        and history_late.versions[1].source == BANK_SOURCE
+        and history_early.current_version == 1
+        and history_late.current_version == 2
+    )
+
+    def bank_invoice(number, inv_date, bank):
+        text = _doc("INVOICE", 1, [
+            ("Supplier", "Cedarline Packaging Co"),
+            ("Invoice Number", number),
+            ("Invoice Date", inv_date),
+            ("Due Date", "2026-11-14"),
+            ("PO Reference", "PO-6002"),
+            ("Currency", "USD"),
+            ("Bank Account", bank),
+            ("Subtotal", "1000.00"), ("Tax", "0.00"),
+            ("Total", "1000.00"),
+        ], [LineItem(sku="SKU-B1", description="Shipping boxes",
+                     quantity=100, unit_price=10.00, amount=1000.00)])
+        (record,) = bank_service.submit(
+            f"SUB-EV-{number}", f"{number.lower()}.pdf",
+            text.encode("utf-8"), "text/plain")
+        return record
+
+    h_before_old = bank_invoice("INV-EV-H1", "2026-09-20", OLD_BANK)
+    h_after_old = bank_invoice("INV-EV-H2", "2026-10-05", OLD_BANK)
+    h_before_new = bank_invoice("INV-EV-H3", "2026-09-20", NEW_BANK)
+    h_after_new = bank_invoice("INV-EV-H4", "2026-10-05", NEW_BANK)
+    h_never = bank_invoice("INV-EV-H5", "2026-10-05",
+                            "US00 ATTK 0000 1111 2222")
+
+    def flag_code(record):
+        return (record.fraud_flags[0].split(":")[0]
+                if record.fraud_flags else "")
+
+    screen_outcomes = (
+        h_before_old.status == "AWAITING_APPROVER"
+        and h_before_old.fraud_flags == []
+        and h_after_new.status == "AWAITING_APPROVER"
+        and h_after_new.fraud_flags == []
+        and h_after_old.status == "FRAUD_REVIEW"
+        and flag_code(h_after_old) == "BANK_DETAILS_SUPERSEDED"
+        and "effective 2026-10-01" in h_after_old.fraud_flags[0]
+        and h_before_new.status == "FRAUD_REVIEW"
+        and flag_code(h_before_new) == "BANK_DETAILS_NOT_YET_EFFECTIVE"
+        and h_never.status == "FRAUD_REVIEW"
+        and flag_code(h_never) == "BANK_DETAILS_CHANGED"
+    )
+
+    # A record decided under the standing master keeps its
+    # stamped outcome when a further version lands — and so
+    # does a held one. Earlier versions never move.
+    bank_service.decide(h_before_old.record_id, "approve",
+                        "Eval Approver")
+    decided_before = bank_service.get_record(
+        h_before_old.record_id).model_dump_json()
+    held_before = bank_service.get_record(
+        h_never.record_id).model_dump_json()
+    series_before = [
+        v.model_dump_json()
+        for v in bank_service.store.reference.bank_versions_for("SUP-03")
+    ]
+    bank_service.record_bank_version(
+        "SUP-03", bank_account="US00 CEDR 5555 6666 7777",
+        bank_name="Cedar Bank", effective_from="2027-01-01",
+        actor="Eval Controller", source=BANK_SOURCE,
+    )
+    series_after = bank_service.store.reference.bank_versions_for(
+        "SUP-03")
+    decided_records_stand = (
+        bank_service.get_record(
+            h_before_old.record_id).model_dump_json() == decided_before
+        and bank_service.get_record(
+            h_never.record_id).model_dump_json() == held_before
+        and [v.model_dump_json() for v in series_after[:2]]
+        == series_before
+        and [v.version for v in series_after] == [1, 2, 3]
+    )
+
+    # The readers: the ledger dates its bank reading (version
+    # 1 of 3 in September, version 2 in November — the third
+    # version is next year's), and a run released today pays
+    # the version in force today.
+    ledger_early = bank_service.supplier_ledger("SUP-03", "2026-09-15")
+    ledger_late = bank_service.supplier_ledger("SUP-03", "2026-11-15")
+    bank_service.decide(h_after_new.record_id, "approve",
+                        "Eval Approver")
+    run = bank_service.create_payment_run(
+        "2026-10-16", record_ids=[h_after_new.record_id])
+    bank_service.decide_payment_run(run.run_id, "release",
+                                    "Eval Treasurer")
+    export_text = bank_service.payment_run_export(
+        run.run_id).decode("utf-8")
+    readers_carry_versions = (
+        ledger_early.bank.bank_account == OLD_BANK
+        and (ledger_early.bank.bank_version,
+             ledger_early.bank.bank_version_count) == (1, 3)
+        and ledger_late.bank.bank_account == NEW_BANK
+        and (ledger_late.bank.bank_version,
+             ledger_late.bank.bank_version_count) == (2, 3)
+        and ledger_late.bank.effective_from == "2026-10-01"
+        and NEW_BANK in export_text and OLD_BANK not in export_text
+    )
+    bank_results = {
+        "timeline_and_provenance": timeline_holds,
+        "screen_outcomes_as_of_invoice_date": screen_outcomes,
+        "decided_records_and_history_stand": decided_records_stand,
+        "readers_carry_the_version": readers_carry_versions,
+    }
+
     total_cases = len(cases)
     passed = sum(1 for c in cases if c["passed"])
     results = {
@@ -1424,6 +1598,7 @@ def evaluate(service: ApService) -> dict:
         "paid_duplicate_watch": watch_results,
         "partial_payments": partial_results,
         "po_coverage": coverage_results,
+        "bank_history": bank_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
@@ -1508,6 +1683,14 @@ def evaluate(service: ApService) -> dict:
             coverage_results["ranking_worst_first_unmeasured_last"],
         "coverage_crossing_informs_never_blocks":
             coverage_results["crossing_informs_never_blocks"],
+        "bank_history_timeline_and_provenance":
+            bank_results["timeline_and_provenance"],
+        "bank_history_screen_outcomes_as_of_invoice_date":
+            bank_results["screen_outcomes_as_of_invoice_date"],
+        "bank_history_decided_records_and_history_stand":
+            bank_results["decided_records_and_history_stand"],
+        "bank_history_readers_carry_the_version":
+            bank_results["readers_carry_the_version"],
     }
     results["gate_passed"] = all(results["gates"].values())
     return results
