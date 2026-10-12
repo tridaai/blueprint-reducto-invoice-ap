@@ -417,5 +417,8 @@ def build_index(
         as_of=date.fromisoformat(str(as_of).strip()[:10]).isoformat(),
         suppliers=entries,
         unmatched_count=len(unmatched),
+        new_supplier_hold_count=sum(
+            1 for doc in unmatched if doc.status == "NEW_SUPPLIER_REVIEW"
+        ),
         unmatched=unmatched,
     )

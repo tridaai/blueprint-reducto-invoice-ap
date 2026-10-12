@@ -109,6 +109,19 @@ class BankVersionRequest(BaseModel):
     source: str  # what it was recorded from — the provenance
 
 
+class EnrolSupplierRequest(BaseModel):
+    actor: str  # the controller who enrols
+    bank_account: str  # the new payee's account, as the master records it
+    bank_name: str = ""
+    source: str  # what the details were verified from — the provenance
+    supplier_id: str | None = None  # stated id, or None for the next free one
+
+
+class RefuseNewSupplierRequest(BaseModel):
+    actor: str
+    reason: str
+
+
 def create_app(service: ApService | None = None) -> FastAPI:
     load_dotenv()
     configure_json_logging()
@@ -246,6 +259,45 @@ def create_app(service: ApService | None = None) -> FastAPI:
     def resolve_duplicate(record_id: str, request: DuplicateResolutionRequest) -> dict:
         record = svc().resolve_duplicate_hold(
             record_id, request.action, request.actor, request.reason
+        )
+        return record.model_dump()
+
+    @app.get("/new-suppliers")
+    def new_supplier_review() -> dict:
+        # The door's queue: every payable document held because
+        # its supplier is not on the master, grouped by the
+        # identity it stated. A pure read — the acts are the
+        # two posts below.
+        return svc().new_supplier_review().model_dump()
+
+    @app.post("/records/{record_id}/enrol", status_code=201)
+    def enrol_supplier(record_id: str, request: EnrolSupplierRequest) -> dict:
+        # The governed enrolment act: create the held
+        # identity's master record — its bank details standing
+        # as version 1, with the provenance the bankmaster
+        # governance requires — and release every held record
+        # of the identity back into the pipeline. The service
+        # refuses by name: no actor, no source, no account, a
+        # stated id already on the master.
+        enrolment = svc().enrol_new_supplier(
+            record_id,
+            actor=request.actor,
+            bank_account=request.bank_account,
+            bank_name=request.bank_name,
+            source=request.source,
+            supplier_id=request.supplier_id,
+        )
+        return enrolment.model_dump()
+
+    @app.post("/records/{record_id}/refuse-new-supplier")
+    def refuse_new_supplier(
+        record_id: str, request: RefuseNewSupplierRequest
+    ) -> dict:
+        # The door's other exit, per record: refused as not a
+        # known supplier, terminally, with the controller's
+        # reason as the record's refusal reason.
+        record = svc().refuse_new_supplier(
+            record_id, request.actor, request.reason
         )
         return record.model_dump()
 

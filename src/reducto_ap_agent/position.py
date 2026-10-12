@@ -61,6 +61,13 @@ record store:
   see the payment happened, and the report's paid totals —
   the aged lines' paid figures plus the fully paid list —
   are the whole of the money the runs have instructed.
+- **Money held at the door is disclosed the same way.** An
+  invoice in NEW_SUPPLIER_REVIEW (enrolment.py) is not a
+  payable — its payee stands on no master record — so it is
+  outside the tie too, listed beside the position with the
+  supplier name exactly as its document wrote it: money
+  waiting on an enrolment decision is visible at the close,
+  never silently absent and never quietly owed.
 """
 
 from __future__ import annotations
@@ -77,6 +84,7 @@ from .schemas import (
     FraudHeldLine,
     FullyCreditedLine,
     FullyPaidLine,
+    NewSupplierHeldLine,
     PositionAnomaly,
     PositionLine,
     PositionReport,
@@ -147,6 +155,7 @@ def build_position(
     packet_totals: dict[str, float] = {}
     suppliers: dict[tuple[str, str, str], SupplierPosition] = {}
     fraud_held: list[FraudHeldLine] = []
+    new_supplier_held: list[NewSupplierHeldLine] = []
     fully_credited: list[FullyCreditedLine] = []
     fully_paid: list[FullyPaidLine] = []
     anomalies: list[PositionAnomaly] = []
@@ -165,6 +174,22 @@ def build_position(
                 face=_face(record),
                 open=open_amount(record),
                 fraud_flags=list(record.fraud_flags),
+            ))
+            continue
+        if record.status == "NEW_SUPPLIER_REVIEW":
+            # Stopped at the door (enrolment.py): a payee
+            # nobody has enrolled is not a payable, so it
+            # stands outside the tie like fraud-held money —
+            # disclosed with the name as the document wrote
+            # it, there being no master name to show.
+            new_supplier_held.append(NewSupplierHeldLine(
+                record_id=record.record_id,
+                supplier_name=str(
+                    record.extraction.value("supplier_name") or ""),
+                invoice_number=invoice_number,
+                currency=currency,
+                face=_face(record),
+                open=open_amount(record),
             ))
             continue
         if record.status != "APPROVED":
@@ -320,6 +345,11 @@ def build_position(
         fraud_totals[held.currency] = _cents(
             fraud_totals.get(held.currency, 0.0) + held.open)
 
+    new_supplier_totals: dict[str, float] = {}
+    for held in new_supplier_held:
+        new_supplier_totals[held.currency] = _cents(
+            new_supplier_totals.get(held.currency, 0.0) + held.open)
+
     return PositionReport(
         as_of=as_of_date.isoformat(),
         bucket_edges=[policy.first_edge, policy.second_edge,
@@ -335,6 +365,10 @@ def build_position(
         fraud_held=sorted(
             fraud_held, key=lambda h: (h.supplier_name, h.invoice_number)),
         fraud_held_totals_by_currency=fraud_totals,
+        new_supplier_held=sorted(
+            new_supplier_held,
+            key=lambda h: (h.supplier_name, h.invoice_number)),
+        new_supplier_held_totals_by_currency=new_supplier_totals,
         fully_credited=sorted(
             fully_credited,
             key=lambda f: (f.supplier_name, f.invoice_number)),
@@ -421,6 +455,16 @@ def position_csv(report: PositionReport) -> bytes:
                 held.record_id, held.supplier_name, held.invoice_number,
                 held.currency, f"{held.face:.2f}", f"{held.open:.2f}",
                 "; ".join(held.fraud_flags),
+            ])
+    if report.new_supplier_held:
+        writer.writerow([])
+        writer.writerow(["NEW-SUPPLIER HELD (outside the tie)",
+                         "Supplier as written", "Invoice", "Currency",
+                         "Face", "Open"])
+        for held in report.new_supplier_held:
+            writer.writerow([
+                held.record_id, held.supplier_name, held.invoice_number,
+                held.currency, f"{held.face:.2f}", f"{held.open:.2f}",
             ])
     if report.fully_credited:
         writer.writerow([])

@@ -107,6 +107,18 @@ def main(argv: list[str] | None = None) -> int:
     p_bank_version.add_argument("--effective-from", required=True, help="the date the new details take effect, YYYY-MM-DD")
     p_bank_version.add_argument("--actor", required=True, help="who recorded the version")
     p_bank_version.add_argument("--source", required=True, help="what it was recorded from — the change notice, the verified callback: the provenance")
+    sub.add_parser("new-suppliers", help="print the new-supplier review queue (JSON): every document held at the door because its supplier is not on the master, grouped by the identity it stated")
+    p_enrol = sub.add_parser("enrol-supplier", help="a controller enrols the supplier one held record arrived from: creates the master record (bank details as version 1, with their provenance) and releases every held record of the identity into the pipeline")
+    p_enrol.add_argument("record_id", help="any held record of the identity being enrolled")
+    p_enrol.add_argument("--actor", required=True, help="the controller who enrols")
+    p_enrol.add_argument("--account", required=True, help="the new payee's bank account, as the master records it")
+    p_enrol.add_argument("--bank-name", default="", help="the new payee's bank name")
+    p_enrol.add_argument("--source", required=True, help="what the details were verified from — the onboarding pack, the verified callback: the provenance")
+    p_enrol.add_argument("--supplier-id", default=None, help="the id to enrol under (default: the next free SUP-<n>) — state it when the buyer's ERP already assigned the vendor number")
+    p_refuse_new = sub.add_parser("refuse-new-supplier", help="a controller refuses one held document as not a known supplier, with the reason")
+    p_refuse_new.add_argument("record_id")
+    p_refuse_new.add_argument("--actor", required=True)
+    p_refuse_new.add_argument("--reason", required=True)
     args = parser.parse_args(argv)
 
     service = build_service()
@@ -231,6 +243,23 @@ def main(argv: list[str] | None = None) -> int:
                 source=args.source,
             )
             print(version.model_dump_json(indent=2))
+        elif args.command == "new-suppliers":
+            print(service.new_supplier_review().model_dump_json(indent=2))
+        elif args.command == "enrol-supplier":
+            enrolment = service.enrol_new_supplier(
+                args.record_id,
+                actor=args.actor,
+                bank_account=args.account,
+                bank_name=args.bank_name,
+                source=args.source,
+                supplier_id=args.supplier_id,
+            )
+            print(enrolment.model_dump_json(indent=2))
+        elif args.command == "refuse-new-supplier":
+            record = service.refuse_new_supplier(
+                args.record_id, args.actor, args.reason
+            )
+            print(record.model_dump_json(indent=2))
     except ApError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
