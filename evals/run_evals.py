@@ -144,6 +144,19 @@ Gates (a failure exits non-zero):
   their lines exactly, the near link classifies its line
   short by exactly the difference, and the foreign advice
   leaves the pile under a not-ours mark with its reason.
+- new-supplier hold — the first payee, on its own planted
+  service (an order the buyer's ERP raised for a supplier AP
+  has never enrolled): the invoice stops at the door in
+  NEW_SUPPLIER_REVIEW, unmatched and unscreened, the gate's
+  refusal names the door, and an enrolment without its
+  provenance is refused; enrolment under the order's own id
+  releases the identity's held records through the pipeline's
+  adjudication — the honest one runs clean to approval, the
+  one whose stated bank details differ from the enrolled
+  ones lands on FRAUD_REVIEW; a later arrival from the
+  enrolled supplier is ordinary; and a second unknown's
+  document is refused terminally as NOT_A_KNOWN_SUPPLIER,
+  enrolling nothing.
 
 Reported, not gated: per-field extraction accuracy, review-queue
 precision. A live run (EVAL_LIVE=1, DOCUMENT_BACKEND=reducto,
@@ -172,11 +185,14 @@ from reducto_ap_agent.schemas import (  # noqa: E402
     DocumentRecord,
     ExtractedDocument,
     ExtractedField,
+    GoodsReceipt,
     LineItem,
     PaymentEntry,
     PaymentRun,
     PaymentRunLine,
+    PurchaseOrder,
     RemittanceLine,
+    Supplier,
     TreasurerDecision,
 )
 from reducto_ap_agent.service import ApService  # noqa: E402
@@ -1741,6 +1757,147 @@ def evaluate(service: ApService) -> dict:
         "not_ours_closes_the_item": not_ours_closes,
     }
 
+    # -- New-supplier hold scenario --------------------------
+    # Its own service: the buyer's ERP raised PO-7701 for
+    # SUP-77 — a supplier AP has never enrolled — and the
+    # first invoices arrive before the master does.
+    ns = build_offline_service()
+    ns.store.reference.purchase_orders["PO-7701"] = PurchaseOrder(
+        po_number="PO-7701", supplier_id="SUP-77",
+        supplier_name="Northbeam Fasteners Ltd", currency="USD",
+        lines=[LineItem(sku="SKU-Z1", description="Hex bolts",
+                        quantity=10, unit_price=25.00, amount=250.00)],
+        total=250.00,
+    )
+    ns.store.reference.receipts_by_po["PO-7701"] = GoodsReceipt(
+        receipt_id="RCV-7701", po_number="PO-7701",
+        supplier_id="SUP-77",
+        lines=[LineItem(sku="SKU-Z1", description="Hex bolts",
+                        quantity=10, unit_price=25.00, amount=250.00)],
+    )
+    ns_account = "US00 NBEA 1212 3434 5656"
+    ns_source = "onboarding pack verified by callback to the number on file"
+    ns_stated = Supplier(
+        supplier_id="SUP-77", name="Northbeam Fasteners Ltd",
+        bank_account=ns_account, bank_name="Northbeam Bank",
+    )
+
+    def ns_submit(submission_id, text):
+        (record,) = ns.submit(
+            submission_id, f"{submission_id.lower()}.pdf",
+            text.encode("utf-8"), "text/plain",
+        )
+        return record
+
+    ns_first = ns_submit("SUB-EVAL-NS1", _doc("INVOICE", 1, _inv_fields(
+        ns_stated, "INV-7701", "PO-7701", 250.00,
+    ), [LineItem(sku="SKU-Z1", description="Hex bolts",
+                 quantity=10, unit_price=25.00, amount=250.00)]))
+    ns_second = ns_submit("SUB-EVAL-NS2", _doc("INVOICE", 1, _inv_fields(
+        Supplier(supplier_id="SUP-77", name="Northbeam Fasteners Ltd",
+                 bank_account="US00 EVIL 9999 8888 7777",
+                 bank_name="Northbeam Bank"),
+        "INV-7702", None, 250.00,
+    ), [LineItem(sku="SKU-Z1", description="Hex bolts",
+                 quantity=10, unit_price=25.00, amount=250.00)]))
+    ns_queue = ns.new_supplier_review()
+    held_with_evidence = (
+        ns_first.status == "NEW_SUPPLIER_REVIEW"
+        and ns_first.supplier_id is None
+        and ns_first.match is None and ns_first.fraud_flags == []
+        and ns_first.supplier_hold is not None
+        and ns_first.supplier_hold.name_as_written
+        == "Northbeam Fasteners Ltd"
+        and ns_second.status == "NEW_SUPPLIER_REVIEW"
+        and ns_queue.held_count == 2
+        and len(ns_queue.groups) == 1
+        and ns_queue.groups[0].record_ids
+        == [ns_first.record_id, ns_second.record_id]
+    )
+    try:
+        ns.decide(ns_first.record_id, "approve", "Eval Approver", "pay")
+        gate_refuses = False
+    except GateError as exc:
+        gate_refuses = "held at the door" in str(exc)
+    try:
+        ns.enrol_new_supplier(
+            ns_first.record_id, "Eval Controller", ns_account,
+            "Northbeam Bank", "")
+        enrolment_governed = False
+    except MasterError:
+        enrolment_governed = True
+    gate_and_governance = (
+        gate_refuses and enrolment_governed
+        and "SUP-77" not in ns.store.reference.suppliers
+        and ns.get_record(ns_first.record_id).status
+        == "NEW_SUPPLIER_REVIEW"
+    )
+
+    ns_enrolment = ns.enrol_new_supplier(
+        ns_first.record_id, "Eval Controller", ns_account,
+        "Northbeam Bank", ns_source, supplier_id="SUP-77",
+    )
+    ns_released_first = ns.get_record(ns_first.record_id)
+    ns_released_second = ns.get_record(ns_second.record_id)
+    enrolment_releases = (
+        ns_enrolment.supplier.supplier_id == "SUP-77"
+        and ns_enrolment.bank_version.version == 1
+        and ns_enrolment.bank_version.recorded_by == "Eval Controller"
+        and ns_enrolment.bank_version.source == ns_source
+        and ns_enrolment.released_record_ids
+        == [ns_first.record_id, ns_second.record_id]
+        and ns_released_first.status == "AWAITING_APPROVER"
+        and ns_released_first.match is not None
+        and ns_released_first.match.status == "MATCHED"
+        and ns_released_second.status == "FRAUD_REVIEW"
+        and any(
+            flag.startswith("BANK_DETAILS_CHANGED")
+            for flag in ns_released_second.fraud_flags
+        )
+        and ns.decide(
+            ns_first.record_id, "approve", "Eval Approver", "clean"
+        ).status == "APPROVED"
+    )
+    ns_third = ns_submit("SUB-EVAL-NS3", _doc("INVOICE", 1, _inv_fields(
+        ns_stated, "INV-7703", "PO-7701", 250.00,
+    ), [LineItem(sku="SKU-Z1", description="Hex bolts",
+                 quantity=10, unit_price=25.00, amount=250.00)]))
+    enrolled_ordinary = (
+        ns_third.status == "AWAITING_APPROVER"
+        and ns_third.supplier_id == "SUP-77"
+        and ns_third.supplier_hold is None
+    )
+    ns_stranger = ns_submit("SUB-EVAL-NS4", _doc("INVOICE", 1, [
+        ("Supplier", "Quarryline Aggregates LLC"),
+        ("Invoice Number", "INV-8801"),
+        ("Invoice Date", "2026-09-14"),
+        ("Due Date", "2026-10-14"),
+        ("Currency", "USD"),
+        ("Bank Account", "US00 QUAR 1212 3434 5656"),
+        ("Subtotal", "90.00"), ("Tax", "0.00"), ("Total", "90.00"),
+    ], [LineItem(sku="SKU-Q1", description="Crushed stone", quantity=3,
+                 unit_price=30.00, amount=90.00)]))
+    ns_stranger_was_held = ns_stranger.status == "NEW_SUPPLIER_REVIEW"
+    ns_refused = ns.refuse_new_supplier(
+        ns_stranger.record_id, "Eval Controller",
+        "no onboarding pack exists for this name",
+    )
+    refusal_terminal = (
+        ns_stranger_was_held
+        and ns_refused.status == "REFUSED"
+        and (ns_refused.refusal_reason or "").startswith(
+            "NOT_A_KNOWN_SUPPLIER")
+        and len(ns.store.reference.suppliers) == 13  # 12 seeded + SUP-77
+        and ns.new_supplier_review().held_count == 0
+    )
+    new_supplier_results = {
+        "held_with_evidence": held_with_evidence,
+        "gate_and_governance_refusals": gate_and_governance,
+        "enrolment_releases_and_judges": enrolment_releases,
+        "enrolled_supplier_ordinary": enrolled_ordinary,
+        "refusal_terminal": refusal_terminal,
+    }
+
     total_cases = len(cases)
     passed = sum(1 for c in cases if c["passed"])
     results = {
@@ -1769,6 +1926,7 @@ def evaluate(service: ApService) -> dict:
         "po_coverage": coverage_results,
         "bank_history": bank_results,
         "advice_worklist": worklist_results,
+        "new_supplier_hold": new_supplier_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
@@ -1871,6 +2029,16 @@ def evaluate(service: ApService) -> dict:
             worklist_results["near_link_classifies_short"],
         "worklist_not_ours_closes_the_item":
             worklist_results["not_ours_closes_the_item"],
+        "new_supplier_held_with_evidence":
+            new_supplier_results["held_with_evidence"],
+        "new_supplier_gate_and_governance_refusals":
+            new_supplier_results["gate_and_governance_refusals"],
+        "new_supplier_enrolment_releases_and_judges":
+            new_supplier_results["enrolment_releases_and_judges"],
+        "new_supplier_enrolled_is_ordinary":
+            new_supplier_results["enrolled_supplier_ordinary"],
+        "new_supplier_refusal_terminal":
+            new_supplier_results["refusal_terminal"],
     }
     results["gate_passed"] = all(results["gates"].values())
     return results
