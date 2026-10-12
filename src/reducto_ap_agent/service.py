@@ -23,7 +23,10 @@ gate discipline:
   reconciled against the released run it names, line by line,
   in code — exactly, never within a tolerance — and stops at
   a controller's gate. An advice that names no run on file is
-  held UNMATCHED, never guessed onto one.
+  held UNMATCHED, never guessed onto one. Held advices land
+  on the worklist (worklist.py), where the arithmetic suggests
+  what each might answer — and only a named controller's
+  link, or their not-ours mark, takes one off the pile.
 - the supplier ledger gathers the whole relationship per
   supplier — documents, invoices with their credit ledgers,
   open statement breaks, the master's bank details and any
@@ -80,6 +83,7 @@ from .bankmaster import build_history, version_at
 from .confirmations import (
     OVERLAY_BY_CLASS,
     reconcile_confirmation,
+    reconcile_linked_confirmation,
     resolve_run_reference,
     unmatched_confirmation,
 )
@@ -119,12 +123,14 @@ from .payments import (
 from .position import build_position, export_key_for_position, position_csv
 from .reconciliation import reconcile_statement
 from .schemas import (
+    AdviceWorklist,
     BankHistory,
     BankVersion,
     ControllerDecision,
     CoverageReport,
     DocumentRecord,
     DuplicateHoldResolution,
+    NotOursMark,
     PaymentConfirmation,
     PaymentEntry,
     PaymentLine,
@@ -138,6 +144,7 @@ from .schemas import (
     TreasurerDecision,
     UnappliedCredit,
 )
+from .worklist import build_worklist
 
 log = logging.getLogger(__name__)
 
@@ -1115,24 +1122,36 @@ class ApService:
             confirmation_id, record, run, created_at=_now(),
         )
         saved = self.store.save_confirmation(confirmation)
+        self._record_confirmation_overlays(saved)
+        return saved
+
+    def _record_confirmation_overlays(
+        self, confirmation: PaymentConfirmation
+    ) -> None:
+        """The one write a confirmation makes beyond its own
+        record: the confirmation overlay on each member record
+        it classifies, with the audit entry that explains it.
+        Shared by the named-run reconciliation and the
+        worklist's linked reconciliation, so a member's overlay
+        means the same thing whichever path classified it."""
         for line in confirmation.lines:
             overlay = OVERLAY_BY_CLASS[line.classification]
             if overlay is None or line.member_record_id is None:
                 continue
             member = self.get_record(line.member_record_id)
             member.payment_confirmation = overlay
-            member.payment_confirmation_id = saved.confirmation_id
+            member.payment_confirmation_id = confirmation.confirmation_id
             member.audit.append({
                 "event": "payment_confirmation_recorded", "at": _now(),
                 "detail": (
-                    f"remittance confirmation {saved.confirmation_id} "
-                    f"(advice {advice_record_id}) classifies this member "
-                    f"{line.classification} against run {run.run_id}"
+                    f"remittance confirmation {confirmation.confirmation_id} "
+                    f"(advice {confirmation.advice_record_id}) classifies "
+                    f"this member {line.classification} against run "
+                    f"{confirmation.run_id}"
                 ),
             })
             member.updated_at = _now()
             self.store.save(member)
-        return saved
 
     def get_confirmation(self, confirmation_id: str) -> PaymentConfirmation:
         confirmation = self.store.get_confirmation(confirmation_id)
@@ -1188,3 +1207,273 @@ class ApService:
         })
         confirmation.updated_at = _now()
         return self.store.save_confirmation(confirmation)
+
+    # -- the unmatched-advice worklist --------------------------
+
+    def advice_worklist(self) -> AdviceWorklist:
+        """The pile of held advices with the candidates
+        computed for each (worklist.py): a pure read that
+        confirms nothing. An advice leaves the pile only when
+        a controller links it or marks it not ours."""
+        return build_worklist(self.store)
+
+    def link_confirmation(
+        self,
+        confirmation_id: str,
+        actor: str,
+        links: list[dict],
+        rule: str = "manual",
+    ) -> PaymentConfirmation:
+        """A controller ties a held advice to a released run by
+        hand: the worklist's act.
+
+        ``links`` pairs advice lines with run members —
+        ``{"advice_line": index, "run_id": ..., "record_ids":
+        [...]}`` — all against ONE run, because a confirmation
+        answers one run (the advice's remaining business, if
+        any, is a second act against a fresh held record).
+        The pairing is the controller's: it may follow a
+        worklist candidate or be the controller's own choice,
+        and ``rule`` names which — a candidate's rule, or
+        "manual". Classification then runs under round 4's
+        exact rule with the pairing standing in for the number
+        match: a single member classifies exact, short, or
+        over on the money as it stands; a multi-member lump
+        settles only when it equals the members' total to the
+        cent — any other lump is refused here, by name, with
+        the remedy, because round 4 has no honest way to split
+        one bank line across members it does not cover."""
+        if not actor or not actor.strip():
+            raise GateError("linking an advice must name its controller")
+        held = self.get_confirmation(confirmation_id)
+        if held.status == "NOT_OURS":
+            mark = held.not_ours
+            raise GateError(
+                f"confirmation {confirmation_id} was marked NOT_OURS "
+                f"by {mark.actor if mark else 'a controller'}"
+                + (f" — {mark.reason}" if mark else "")
+                + "; a not-ours advice is closed, and the mark is "
+                "the end of its worklist life"
+            )
+        if held.status != "UNMATCHED":
+            raise GateError(
+                f"confirmation {confirmation_id} is {held.status} and "
+                f"already answers run {held.run_id} — only a held "
+                "UNMATCHED advice can be linked"
+            )
+        already = [
+            c for c in self.store.list_confirmations()
+            if c.linked_from == confirmation_id
+        ]
+        if already:
+            raise GateError(
+                f"confirmation {confirmation_id} was already linked "
+                f"as {already[0].confirmation_id} against run "
+                f"{already[0].run_id}; any lines it did not cover "
+                "answer in a fresh confirmation of the advice"
+            )
+        if not links:
+            raise ConfirmationError(
+                "a link names no lines — pair at least one advice "
+                "line with the run members it answers"
+            )
+        advice = self.get_record(held.advice_record_id)
+        if advice.extraction is None:
+            raise ConfirmationError(
+                f"remittance advice {advice.record_id} carries no "
+                "captured extraction; its paid lines were never read"
+            )
+        advice_lines = advice.extraction.remittance_lines
+
+        run_ids = {str(link.get("run_id") or "") for link in links}
+        if len(run_ids) != 1 or not next(iter(run_ids)):
+            raise GateError(
+                "one link act ties an advice to ONE run — the links "
+                f"named {', '.join(sorted(run_ids)) or 'no run'}; "
+                "link each run's members in its own act"
+            )
+        run_id = next(iter(run_ids))
+        run = self.store.get_payment_run(run_id)
+        if run is None:
+            raise GateError(
+                f"payment run {run_id} is not on file — a link can "
+                "only tie an advice to a run that exists"
+            )
+        if run.status != "RELEASED":
+            raise GateError(
+                f"payment run {run_id} is {run.status} — links answer "
+                "released runs, because only a released run has "
+                "proposed payments that could have left the bank"
+            )
+        members_by_id = {line.record_id: (i, line)
+                         for i, line in enumerate(run.lines)}
+        settled = {
+            (c.run_id, line.member_record_id)
+            for c in self.store.list_confirmations()
+            for line in c.lines
+            if c.run_id is not None
+            and line.classification == "paid_as_proposed"
+            and line.member_record_id is not None
+        }
+
+        pairings: list[tuple[int, list[int]]] = []
+        seen_advice: set[int] = set()
+        seen_members: set[str] = set()
+        for link in links:
+            advice_index = link.get("advice_line")
+            if not isinstance(advice_index, int) \
+                    or not 0 <= advice_index < len(advice_lines):
+                raise ConfirmationError(
+                    f"advice line {advice_index!r} is not a line of "
+                    f"advice {advice.record_id}, which carries "
+                    f"{len(advice_lines)} paid line(s)"
+                )
+            if advice_index in seen_advice:
+                raise ConfirmationError(
+                    f"advice line {advice_index} is paired twice — "
+                    "one advice line answers one set of members"
+                )
+            seen_advice.add(advice_index)
+            record_ids = [str(r) for r in link.get("record_ids") or []]
+            if not record_ids:
+                raise ConfirmationError(
+                    f"advice line {advice_index} is paired with no "
+                    "run members — name the members it answers"
+                )
+            member_indices: list[int] = []
+            for record_id in record_ids:
+                if record_id in seen_members:
+                    raise GateError(
+                        f"run member {record_id} is paired twice — a "
+                        "member is answered once in one confirmation"
+                    )
+                seen_members.add(record_id)
+                found = members_by_id.get(record_id)
+                if found is None:
+                    raise GateError(
+                        f"record {record_id} is not a member of "
+                        f"payment run {run_id} — a link pairs an "
+                        "advice line with members of the run it ties to"
+                    )
+                member_indices.append(found[0])
+                if (run_id, record_id) in settled:
+                    raise GateError(
+                        f"run member {record_id} "
+                        f"({found[1].invoice_number}) was already "
+                        "confirmed paid as proposed for this run — "
+                        "settled money is never linked twice"
+                    )
+            aline = advice_lines[advice_index]
+            if len(member_indices) > 1:
+                members = [run.lines[i] for i in member_indices]
+                suppliers = {m.supplier_id for m in members}
+                if len(suppliers) > 1:
+                    raise GateError(
+                        "a combined link covers one supplier's lines "
+                        "of one run — the members named span "
+                        f"{len(suppliers)} suppliers; link each "
+                        "supplier's members separately"
+                    )
+                currencies = {m.currency for m in members}
+                if currencies != {aline.currency}:
+                    raise GateError(
+                        "a combined link settles in the advice "
+                        f"line's currency ({aline.currency}) — the "
+                        "members named stand in "
+                        f"{', '.join(sorted(currencies))}; link the "
+                        "members singly, where a currency break "
+                        "classifies short in round 4's own words"
+                    )
+                total = round(sum(m.amount for m in members), 2)
+                paid = round(float(aline.amount_paid), 2)
+                if total != paid:
+                    raise GateError(
+                        f"advice line {advice_index} pays {paid:.2f} "
+                        f"{aline.currency} against members totalling "
+                        f"{total:.2f} — a difference of "
+                        f"{paid - total:+.2f}; a combined link "
+                        "settles only when the lump equals the "
+                        "members' total to the cent. Link the lump "
+                        "against a single member instead (it will "
+                        "classify short or over, in round 4's own "
+                        "words), or hold the advice for a corrected "
+                        "one from the bank"
+                    )
+            pairings.append((advice_index, member_indices))
+
+        existing = [
+            c for c in self.store.list_confirmations()
+            if c.advice_record_id == advice.record_id
+        ]
+        new_id = f"CONF-{advice.record_id}"
+        if existing:
+            new_id = f"{new_id}-{len(existing) + 1}"
+        confirmation = reconcile_linked_confirmation(
+            new_id, advice, run, pairings,
+            linked_by=actor, linked_rule=rule,
+            linked_from=confirmation_id, created_at=_now(),
+        )
+        saved = self.store.save_confirmation(confirmation)
+        self._record_confirmation_overlays(saved)
+        held.audit.append({
+            "event": "linked", "at": _now(),
+            "detail": (
+                f"linked by {actor} under {rule} against run "
+                f"{run.run_id} as {saved.confirmation_id}"
+            ),
+        })
+        held.updated_at = _now()
+        self.store.save_confirmation(held)
+        return saved
+
+    def mark_advice_not_ours(
+        self, confirmation_id: str, actor: str, reason: str
+    ) -> PaymentConfirmation:
+        """A controller closes a held advice as not this
+        company's money: the bank sent another customer's
+        advice, or the payment belongs to another company's
+        batch. The mark names its controller and its reason,
+        the advice leaves the worklist, and the record stands —
+        a closed item is still evidence of what arrived."""
+        if not actor or not actor.strip():
+            raise GateError(
+                "marking an advice not ours must name its controller"
+            )
+        if not reason or not reason.strip():
+            raise GateError(
+                "marking an advice not ours requires a reason — "
+                "the next person to meet this advice in the pile "
+                "reads why it was closed"
+            )
+        held = self.get_confirmation(confirmation_id)
+        if held.status == "NOT_OURS":
+            mark = held.not_ours
+            raise GateError(
+                f"confirmation {confirmation_id} is already NOT_OURS"
+                + (f" — marked by {mark.actor}: {mark.reason}"
+                   if mark else "")
+            )
+        if held.status != "UNMATCHED":
+            raise GateError(
+                f"confirmation {confirmation_id} is {held.status} and "
+                f"answers run {held.run_id} — only a held UNMATCHED "
+                "advice can be marked not ours"
+            )
+        already = [
+            c for c in self.store.list_confirmations()
+            if c.linked_from == confirmation_id
+        ]
+        if already:
+            raise GateError(
+                f"confirmation {confirmation_id} was already linked "
+                f"as {already[0].confirmation_id} — a linked advice "
+                "has been answered for; it cannot be marked not ours"
+            )
+        held.status = "NOT_OURS"
+        held.not_ours = NotOursMark(actor=actor, reason=reason, at=_now())
+        held.audit.append({
+            "event": "marked_not_ours", "at": _now(),
+            "detail": f"marked not ours by {actor} — {reason}",
+        })
+        held.updated_at = _now()
+        return self.store.save_confirmation(held)

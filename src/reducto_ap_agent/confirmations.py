@@ -48,6 +48,14 @@ confirmation overlay on each member record it classifies —
 and nothing else. The run, its decision, and its export bytes
 are untouched; approvals and memberships are untouched; no
 bank data or supplier master is ever written from an advice.
+
+A held advice is not a dead end: the worklist (worklist.py)
+computes what it might answer, and a controller may LINK it
+to a run by hand. The linked reconciliation below classifies
+that advice against that run under this module's exact rule,
+with the controller's pairings standing in for the number
+match the advice never made — the link is a human act on the
+record, never an inference the system drew by itself.
 """
 
 from __future__ import annotations
@@ -298,6 +306,38 @@ def reconcile_confirmation(
             ),
         ))
 
+    counts, totals, totals_tie, flags, notes = _summarise(lines, run)
+    return PaymentConfirmation(
+        confirmation_id=confirmation_id,
+        advice_record_id=advice.record_id,
+        submission_id=advice.submission_id,
+        run_id=run.run_id,
+        status="AWAITING_CONTROLLER",
+        lines=lines,
+        counts=counts,
+        totals=totals,
+        totals_tie=totals_tie,
+        flags=flags,
+        notes=notes,
+        audit=[{"event": "confirmed", "at": created_at}],
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
+def _summarise(
+    lines: list[ConfirmationLine], run: PaymentRun
+) -> tuple[dict[str, int], list[ConfirmationTotals], bool,
+           list[str], list[str]]:
+    """The summary arithmetic over a classified line set:
+    counts per class, per-currency totals recomputed against
+    the run's own member lines, the tie, and the flags and
+    notes the arithmetic itself raises. Shared by the named-run
+    reconciliation above and the worklist's linked
+    reconciliation below, so a linked confirmation's summary
+    is computed by exactly the arithmetic that computes a
+    named one's — a classification cannot make its own sums
+    look right in either path."""
     counts = {name: 0 for name in CONFIRM_CLASSES}
     for line in lines:
         counts[line.classification] += 1
@@ -383,7 +423,213 @@ def reconcile_confirmation(
             "than proposed; their paid figures ride their lines in "
             "their own currency and are excluded from the paid totals."
         )
+    return counts, totals, totals_tie, flags, notes
 
+
+def reconcile_linked_confirmation(
+    confirmation_id: str,
+    advice: DocumentRecord,
+    run: PaymentRun,
+    pairings: list[tuple[int, list[int]]],
+    *,
+    linked_by: str,
+    linked_rule: str,
+    linked_from: str,
+    created_at: str = "",
+) -> PaymentConfirmation:
+    """Reconcile one held advice against the run a controller
+    linked it to (the worklist's act).
+
+    ``pairings`` — (advice line index, member indices) — is
+    the controller's word, validated by the service before
+    this is called: every member belongs to ``run``, no member
+    or advice line is paired twice, no member was already
+    settled exactly, and a multi-member pairing sums exactly
+    to its advice line in one currency. What remains here is
+    classification, under round 4's exact rule, with the
+    pairing standing in for the number match the advice could
+    not make on its own:
+
+    - a single-member pairing classifies exactly as the
+      named-run reconciliation does — currency break, exact,
+      short, over — with the difference signed and named;
+    - a multi-member pairing is a lump that covers each
+      member in full (the service refused any other lump), so
+      each member is paid as proposed, the lump on its note;
+    - advice lines the controller did not pair are
+      ``unexpected_line`` — shown, never absorbed;
+    - members no pairing names are ``missing``, as ever.
+
+    The provenance rides every paired line's note: who linked
+    it, under which rule, and the reference as the bank
+    actually wrote it — the typo stays visible on the record
+    that settles it."""
+    extraction = advice.extraction
+    assert extraction is not None  # the service validates before calling
+    advice_lines = extraction.remittance_lines
+    provenance = (
+        f"Linked by {linked_by} under {linked_rule} from held "
+        f"confirmation {linked_from}."
+    )
+
+    paired_members: dict[int, tuple[int, list[int]]] = {}
+    paired_advice: set[int] = set()
+    for advice_index, member_indices in pairings:
+        paired_advice.add(advice_index)
+        for member_index in member_indices:
+            paired_members[member_index] = (advice_index, member_indices)
+
+    lines: list[ConfirmationLine] = []
+    for advice_index, aline in enumerate(advice_lines):
+        if advice_index not in paired_advice:
+            lines.append(ConfirmationLine(
+                invoice_number=aline.invoice_number,
+                classification="unexpected_line",
+                paid_amount=_cents(aline.amount_paid),
+                currency=aline.currency,
+                value_date=aline.value_date,
+                bank_reference=aline.bank_reference,
+                note=(
+                    "The controller did not link this advice line to a "
+                    f"member of payment run {run.run_id} — shown, never "
+                    "absorbed into the run's totals. " + provenance
+                ),
+            ))
+            continue
+        member_indices = next(
+            members for idx, members in pairings if idx == advice_index
+        )
+        paid = _cents(aline.amount_paid)
+        if len(member_indices) > 1:
+            numbers = ", ".join(
+                run.lines[m].invoice_number for m in member_indices
+            )
+            for member_index in member_indices:
+                member = run.lines[member_index]
+                proposed = _cents(member.amount)
+                lines.append(ConfirmationLine(
+                    invoice_number=member.invoice_number,
+                    classification="paid_as_proposed",
+                    proposed_amount=proposed,
+                    paid_amount=proposed,
+                    currency=member.currency,
+                    member_record_id=member.record_id,
+                    value_date=aline.value_date,
+                    bank_reference=aline.bank_reference,
+                    difference=0.0,
+                    note=(
+                        f"Paid exactly as proposed, to the cent — as one "
+                        f"lump of {paid:.2f} {aline.currency} covering "
+                        f"{numbers}, the advice's reference as written "
+                        f"being {aline.invoice_number!r}. " + provenance
+                    ),
+                ))
+            continue
+        member = run.lines[member_indices[0]]
+        proposed = _cents(member.amount)
+        reference_note = (
+            f"The advice's reference as written is "
+            f"{aline.invoice_number!r}. " + provenance
+        )
+        if aline.currency != member.currency:
+            lines.append(ConfirmationLine(
+                invoice_number=member.invoice_number,
+                classification="short_paid",
+                proposed_amount=proposed,
+                paid_amount=paid,
+                currency=member.currency,
+                member_record_id=member.record_id,
+                value_date=aline.value_date,
+                bank_reference=aline.bank_reference,
+                note=(
+                    f"Currency differs: the run proposed {member.currency} "
+                    f"but the advice reports {aline.currency} — nothing "
+                    f"arrived in the proposed currency, so the member is "
+                    f"short by the full {proposed:.2f} {member.currency} "
+                    "until the currency break is resolved. The paid "
+                    "figure rides this line in its own currency and "
+                    "stays out of the paid totals. " + reference_note
+                ),
+            ))
+        elif paid == proposed:
+            lines.append(ConfirmationLine(
+                invoice_number=member.invoice_number,
+                classification="paid_as_proposed",
+                proposed_amount=proposed,
+                paid_amount=paid,
+                currency=member.currency,
+                member_record_id=member.record_id,
+                value_date=aline.value_date,
+                bank_reference=aline.bank_reference,
+                difference=0.0,
+                note=(
+                    "Paid exactly as proposed, to the cent. "
+                    + reference_note
+                ),
+            ))
+        elif paid < proposed:
+            lines.append(ConfirmationLine(
+                invoice_number=member.invoice_number,
+                classification="short_paid",
+                proposed_amount=proposed,
+                paid_amount=paid,
+                currency=member.currency,
+                member_record_id=member.record_id,
+                value_date=aline.value_date,
+                bank_reference=aline.bank_reference,
+                difference=_cents(paid - proposed),
+                note=(
+                    f"Proposed {proposed:.2f} but {paid:.2f} arrived — "
+                    f"short {_cents(proposed - paid):.2f} {member.currency}. "
+                    "Bank charges, a partial payment, or an error: a "
+                    "human finds out which. " + reference_note
+                ),
+            ))
+        else:
+            lines.append(ConfirmationLine(
+                invoice_number=member.invoice_number,
+                classification="over_paid",
+                proposed_amount=proposed,
+                paid_amount=paid,
+                currency=member.currency,
+                member_record_id=member.record_id,
+                value_date=aline.value_date,
+                bank_reference=aline.bank_reference,
+                difference=_cents(paid - proposed),
+                note=(
+                    f"Proposed {proposed:.2f} but {paid:.2f} arrived — "
+                    f"over by {_cents(paid - proposed):.2f} {member.currency}. "
+                    "Money the run never instructed is still a break. "
+                    + reference_note
+                ),
+            ))
+
+    for index, member in enumerate(run.lines):
+        if index in paired_members:
+            continue
+        lines.append(ConfirmationLine(
+            invoice_number=member.invoice_number,
+            classification="missing",
+            proposed_amount=_cents(member.amount),
+            currency=member.currency,
+            member_record_id=member.record_id,
+            note=(
+                f"The run was released for value date {run.value_date} and "
+                "the linked advice does not answer for this invoice — "
+                "the payment is unaccounted for until the bank answers "
+                "for it."
+            ),
+        ))
+
+    counts, totals, totals_tie, flags, notes = _summarise(lines, run)
+    notes.insert(0, (
+        f"This confirmation exists because {linked_by} linked held "
+        f"advice {advice.record_id} to run {run.run_id} under "
+        f"{linked_rule} (from held confirmation {linked_from}); the "
+        "advice named no run this system could use, and no "
+        "suggestion confirmed itself — the link is the act on "
+        "this record."
+    ))
     return PaymentConfirmation(
         confirmation_id=confirmation_id,
         advice_record_id=advice.record_id,
@@ -396,7 +642,17 @@ def reconcile_confirmation(
         totals_tie=totals_tie,
         flags=flags,
         notes=notes,
-        audit=[{"event": "confirmed", "at": created_at}],
+        linked_by=linked_by,
+        linked_rule=linked_rule,
+        linked_from=linked_from,
+        audit=[{
+            "event": "linked", "at": created_at,
+            "detail": (
+                f"linked from held confirmation {linked_from} by "
+                f"{linked_by} under {linked_rule} against run "
+                f"{run.run_id}"
+            ),
+        }],
         created_at=created_at,
         updated_at=created_at,
     )
