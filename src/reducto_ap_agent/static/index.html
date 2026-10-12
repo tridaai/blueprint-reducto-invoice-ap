@@ -176,6 +176,13 @@
     <div id="ledger-detail"></div>
   </section>
 </div>
+<div style="padding: 0 28px 8px;">
+  <section>
+    <h2>PO coverage</h2>
+    <p class="note" style="margin-top:0;">What has been billed against each purchase order, in total — the accumulation the per-invoice match cannot see. Billed is the sum over APPROVED invoices of face minus applied credits; payments settle a bill, they never shrink it, so a part-paid invoice bills in full. An order's total is the order register's, and the row says so; an order no register carries reads UNMEASURED — its billed sum listed, no verdict invented. Coverage informs the approver's gate; it never blocks it and never rewrites a match outcome.</p>
+    <div id="coverage" class="note">No coverage yet — load the demo world.</div>
+  </section>
+</div>
 <footer>
   <img src="/favicon.svg" alt="Trida AI">
   <span>Trida AI — Blueprint: Reducto Invoice AP, deployed in-VPC</span>
@@ -323,6 +330,15 @@ async function showRecord(id) {
         + r.match.line_matches.map(l => `<tr><td>${l.sku}</td><td>${l.verdict}</td><td>${l.invoiced_qty}</td><td>${l.received_qty}</td><td>${money(l.po_unit_price)}</td><td>${money(l.invoice_unit_price)}</td></tr>`).join("")
         + `</tbody></table>`;
   }
+  if (r.doc_class === "invoice" && r.extraction && r.extraction.fields.po_reference && r.extraction.fields.po_reference.value) {
+    try {
+      const cov = await api(`/records/${r.record_id}/po-coverage`);
+      const warn = cov.state === "EXCEEDED" || cov.state === "WATCH";
+      html += `<h2 style="margin-top:14px;">PO coverage — counting this invoice</h2>`
+        + (warn ? `<p class="flag">⚠ ${cov.fact}</p>` : `<p class="note">${cov.fact}</p>`)
+        + `<p class="note">Coverage informs the gate; it never blocks it. A decision taken while the order stands EXCEEDED is recorded on this record's audit trail with this fact quoted.</p>`;
+    } catch (e) { /* no coverage fact for this record — the error names why; the detail stands without it */ }
+  }
   if (r.decision)
     html += `<p class="note" style="margin-top:10px;">Gate: ${r.decision.decision} by ${r.decision.actor}${r.decision.reason ? " — " + r.decision.reason : ""}</p>`;
   if (r.doc_class === "credit_note")
@@ -373,7 +389,7 @@ async function showRecord(id) {
           method: "POST", headers: {"Content-Type": "application/json"},
           body: JSON.stringify({decision, actor: $("actor").value, reason: $("reason").value}),
         });
-        await loadRecords(); await showRecord(r.record_id);
+        await loadRecords(); await showRecord(r.record_id); await loadCoverage(); await loadLedgers();
       } catch (e) { $("gate-error").textContent = e.message; }
     };
     $("approve").addEventListener("click", () => decide("approve"));
@@ -607,8 +623,8 @@ async function showLedger(supplierId) {
   if (l.bank.warning)
     html += `<p class="flag">⚠ Bank-change warning — ${l.bank.warning} (records: ${l.bank.flagged_record_ids.join(", ")}). Fraud is resolved in the master, out of band; the gate cannot clear it.</p>`;
   if (l.invoices.length) {
-    html += `<table><thead><tr><th>Invoice</th><th>Status</th><th>Face</th><th>Credits</th><th>Payments</th><th>Open</th><th>Match</th><th>Payment</th><th>Bank said</th><th>Ageing</th></tr></thead><tbody>`
-      + l.invoices.map(i => `<tr><td>${i.invoice_number}</td><td class="status st-${i.status}">${i.status}</td><td>${money(i.face)}</td><td>${i.credits_applied.length ? i.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", ") : "—"}</td><td>${i.payments_applied && i.payments_applied.length ? i.payments_applied.map(p => money(p.amount) + " in " + p.run_id).join(", ") : "—"}</td><td><strong>${money(i.open)}</strong></td><td>${i.match_status || "—"}${i.exception_codes.length ? " (" + i.exception_codes.join(", ") + ")" : ""}</td><td>${i.payment_state ? i.payment_state + " · " + (i.payment_run_id || "") : "—"}</td><td>${i.payment_confirmation || "—"}</td><td>${i.bucket || (i.fully_credited ? "fully credited" : "—")}</td></tr>`).join("")
+    html += `<table><thead><tr><th>Invoice</th><th>Status</th><th>Face</th><th>Credits</th><th>Payments</th><th>Open</th><th>Match</th><th>Payment</th><th>Bank said</th><th>Ageing</th><th>PO coverage</th></tr></thead><tbody>`
+      + l.invoices.map(i => `<tr><td>${i.invoice_number}</td><td class="status st-${i.status}">${i.status}</td><td>${money(i.face)}</td><td>${i.credits_applied.length ? i.credits_applied.map(c => c.credit_number + " " + money(c.amount)).join(", ") : "—"}</td><td>${i.payments_applied && i.payments_applied.length ? i.payments_applied.map(p => money(p.amount) + " in " + p.run_id).join(", ") : "—"}</td><td><strong>${money(i.open)}</strong></td><td>${i.match_status || "—"}${i.exception_codes.length ? " (" + i.exception_codes.join(", ") + ")" : ""}</td><td>${i.payment_state ? i.payment_state + " · " + (i.payment_run_id || "") : "—"}</td><td>${i.payment_confirmation || "—"}</td><td>${i.bucket || (i.fully_credited ? "fully credited" : "—")}</td><td>${i.po_reference ? i.po_reference + (i.po_coverage_state ? " · " + i.po_coverage_state : "") : "—"}</td></tr>`).join("")
       + `</tbody></table>`;
   } else html += `<p class="note">No invoices on file for this supplier.</p>`;
   const heldInvoices = l.invoices.filter(i => i.duplicate_hold);
@@ -631,6 +647,23 @@ async function showLedger(supplierId) {
   $("ledger-detail").innerHTML = html;
 }
 
+async function loadCoverage() {
+  const report = await api("/po-coverage");
+  const host = $("coverage");
+  if (!report.orders.length) { host.innerHTML = "No orders on the register and nothing billed — coverage is empty."; return; }
+  host.classList.remove("note");
+  const counts = Object.entries(report.counts).map(([k, n]) => `${k} ${n}`).join(" · ");
+  let html = `<p class="note" style="margin-top:0;">Watch at ${report.watch_pct}% of the order total · ${counts}</p>`;
+  html += report.orders.map(o => {
+    const pct = o.pct === null || o.pct === undefined ? "—" : o.pct.toFixed(1) + "%";
+    const total = o.total === null || o.total === undefined ? "not on file" : money(o.total);
+    const lines = o.lines.map(l => `<div class="note" style="margin-left:14px;">${l.invoice_number} · ${l.record_id} · face ${money(l.face)}${l.credits ? " − credits " + money(l.credits) : ""} = bills <strong>${money(l.billable)}</strong> · cumulative ${money(l.cumulative_billed)}${l.cumulative_pct === null || l.cumulative_pct === undefined ? "" : " (" + l.cumulative_pct.toFixed(1) + "%)"}</div>`).join("");
+    const excluded = (o.excluded || []).map(x => `<div class="note" style="margin-left:14px;">not summed: ${x.invoice_number} · ${x.currency} ${money(x.amount)} — ${x.reason}</div>`).join("");
+    return `<details><summary><strong>${o.state}</strong> ${o.po_number} · ${o.supplier_name || "—"} · billed <strong>${o.currency} ${money(o.billed)}</strong> of ${total} · ${pct} <span class="note">total: ${o.total_source === "ORDER_REGISTER" ? "order register" : "not on file"}</span></summary>${lines}${excluded}</details>`;
+  }).join("");
+  host.innerHTML = html;
+}
+
 $("create-run").addEventListener("click", async () => {
   $("run-error").textContent = "";
   const currencies = $("run-currencies").value.split(",").map(s => s.trim()).filter(Boolean);
@@ -643,11 +676,11 @@ $("create-run").addEventListener("click", async () => {
   } catch (e) { $("run-error").textContent = e.message; }
 });
 
-$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadWatch(); await loadLedgers(); });
-$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadWatch(); await loadLedgers(); });
+$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadWatch(); await loadLedgers(); await loadCoverage(); });
+$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadWatch(); await loadLedgers(); await loadCoverage(); });
 $("load-position").addEventListener("click", async () => { await loadPosition(); await loadWatch(); await loadLedgers(); });
 $("status-filter").addEventListener("change", loadRecords);
-readiness(); loadRecords(); loadRecons(); loadRuns(); loadConfirmations(); loadPosition(); loadWatch(); loadLedgers();
+readiness(); loadRecords(); loadRecons(); loadRuns(); loadConfirmations(); loadPosition(); loadWatch(); loadLedgers(); loadCoverage();
 </script>
 </body>
 </html>
