@@ -38,7 +38,13 @@ same figures at each step — and finally PO coverage: every
 order's accumulated approved billing against the total the
 order register states, the orders this world has together
 billed past their totals ranked at the top, and the note the
-crossing approval left on its record.
+crossing approval left on its record — and finally the
+master's past: Cedarline's legitimate bank change, recorded
+with its provenance and an effective date, and the two
+invoices that prove the screen reads the master as of each
+invoice's own date — one dated before the change, quoting the
+old bank and clean; one dated after it, quoting the old bank
+still, and held for quoting details the master had retired.
 """
 
 from __future__ import annotations
@@ -493,6 +499,58 @@ def run_demo() -> ApService:
     print("  No approval above was blocked by any of this — coverage "
           "informs the gate. What it removes is the ability to say "
           "the accumulation was never shown.")
+
+    print("\nThe master's past — Cedarline changes banks, "
+          "legitimately, and the screen reads history:")
+    service.record_bank_version(
+        "SUP-03", bank_account="US00 CEDR 9999 8888 7777",
+        bank_name="Cedar Bank", effective_from="2026-10-01",
+        actor="Priya Nair (AP lead)",
+        source=("supplier letter dated 2026-09-25, verified by "
+                "callback to the number on file"),
+    )
+
+    def cedar_invoice(number: str, inv_date: str, bank: str) -> str:
+        return _doc("INVOICE", 1, [
+            ("Supplier", "Cedarline Packaging Co"),
+            ("Invoice Number", number),
+            ("Invoice Date", inv_date),
+            ("Due Date", "2026-11-14"),
+            ("PO Reference", "PO-6002"),
+            ("Currency", "USD"),
+            ("Bank Account", bank),
+            ("Subtotal", "1000.00"), ("Tax", "0.00"),
+            ("Total", "1000.00"),
+        ], [LineItem(sku="SKU-B1", description="Shipping boxes",
+                     quantity=100, unit_price=10.00, amount=1000.00)])
+
+    old_bank = "US00 CEDR 2222 3333 4444"
+    for sid, number, inv_date, bank in (
+        ("SUB-D-H1", "INV-D901", "2026-09-20", old_bank),
+        ("SUB-D-H2", "INV-D902", "2026-10-05", old_bank),
+    ):
+        (record,) = service.submit(
+            sid, f"{sid.lower()}.pdf",
+            cedar_invoice(number, inv_date, bank).encode(),
+            "text/plain")
+        flags = "; ".join(record.fraud_flags) or "no flags"
+        print(f"  {number} dated {inv_date}, quoting the old bank "
+              f"…{old_bank[-4:]} → {record.status} ({flags})")
+    timeline = service.bank_history("SUP-03", "2026-11-15")
+    print("  Cedarline's bank timeline, as the master records it:")
+    for v in timeline.versions:
+        effective = (
+            f"effective from {v.effective_from}" if v.effective_from
+            else "the seeded details — effective before the record")
+        provenance = (
+            f"recorded by {v.recorded_by} from: {v.source}"
+            if v.recorded_by else v.source)
+        marker = (" · in force at 2026-11-15"
+                  if v.version == timeline.current_version else "")
+        print(f"    v{v.version} · {v.bank_name} · {v.bank_account} · "
+              f"{effective} · {provenance}{marker}")
+    print("  Same bank on both invoices, opposite outcomes — the "
+          "difference is the date, and the master can now say why.")
 
     return service
 
