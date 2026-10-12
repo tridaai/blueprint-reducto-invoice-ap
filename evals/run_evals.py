@@ -131,6 +131,19 @@ Gates (a failure exits non-zero):
   confirmed hold refuses permanently, a second arrival
   re-holds after a release, and the paid record and its run
   are byte-identical throughout.
+- unmatched-advice worklist — the pile round 4 leaves behind,
+  on its own planted service: four held advices against one
+  released run — a reference one edit from a line at its
+  exact amount tops the candidates under the reference rule,
+  a lump equal to two lines' sum draws the combined
+  candidate, an amount 3.00 under a named line is suggested
+  near and labelled near, and an advice for another
+  company's money draws nothing; the suggestions confirm
+  NOTHING until a controller links (the pile and every
+  overlay stand untouched), the typo and lump links settle
+  their lines exactly, the near link classifies its line
+  short by exactly the difference, and the foreign advice
+  leaves the pile under a not-ours mark with its reason.
 
 Reported, not gated: per-field extraction accuracy, review-queue
 precision. A live run (EVAL_LIVE=1, DOCUMENT_BACKEND=reducto,
@@ -1572,6 +1585,162 @@ def evaluate(service: ApService) -> dict:
         "readers_carry_the_version": readers_carry_versions,
     }
 
+    # -- Unmatched-advice worklist scenario ----------------------
+    # Its own service and planted records: one released run of
+    # four unsettled lines, and four advices round 4 must hold —
+    # a reference with a one-character typo at the exact amount,
+    # one lump covering two lines, a near miss against a named
+    # line, and an advice that is not this company's money.
+    wl = build_offline_service()
+
+    def wl_invoice(record_id, number, total):
+        wl.store.save(DocumentRecord(
+            record_id=record_id, submission_id="SUB-EVAL-WL",
+            filename=f"{record_id}.pdf", doc_class="invoice",
+            status="APPROVED", match_outcome="MATCHED",
+            decided_by="Eval Approver", supplier_id="SUP-02",
+            extraction=ExtractedDocument(doc_class="invoice", fields={
+                "invoice_number": ExtractedField(value=number),
+                "total": ExtractedField(value=total),
+            }, currency="USD"),
+        ))
+
+    def wl_advice(record_id, rows):
+        wl.store.save(DocumentRecord(
+            record_id=record_id, submission_id="SUB-EVAL-WL",
+            filename=f"{record_id}.pdf", doc_class="remittance_advice",
+            status="RECEIVED",
+            extraction=ExtractedDocument(
+                doc_class="remittance_advice",
+                remittance_lines=[
+                    RemittanceLine(
+                        invoice_number=number, amount_paid=amount,
+                        currency="USD", value_date="2026-10-21",
+                        bank_reference=f"BNK-{record_id}-{i}",
+                    ) for i, (number, amount) in enumerate(rows)
+                ], currency="USD"),
+        ))
+        held = wl.confirm_remittance(record_id)
+        assert held.status == "UNMATCHED", held
+        return held
+
+    for record_id, number, total in (
+        ("REC-WL-1", "INV-W1", 500.00), ("REC-WL-2", "INV-W2", 300.00),
+        ("REC-WL-3", "INV-W3", 200.00), ("REC-WL-4", "INV-W4", 750.00),
+    ):
+        wl_invoice(record_id, number, total)
+    wl_run = wl.create_payment_run(
+        "2026-10-21",
+        record_ids=["REC-WL-1", "REC-WL-2", "REC-WL-3", "REC-WL-4"],
+    )
+    wl_run = wl.decide_payment_run(
+        wl_run.run_id, "release", "Eval Treasurer", "batch reviewed"
+    )
+    typo_held = wl_advice("REC-WL-ADV1", [("INV-WI", 500.00)])
+    lump_held = wl_advice("REC-WL-ADV2", [("BATCH-9", 500.00)])
+    near_held = wl_advice("REC-WL-ADV3", [("INV-W4", 747.00)])
+    foreign_held = wl_advice("REC-WL-ADV4", [("OTHER-CO-11", 1234.00)])
+
+    pile = wl.advice_worklist()
+    by_advice = {e.advice_record_id: e for e in pile.entries}
+    typo_top = by_advice["REC-WL-ADV1"].advice_lines[0].candidates[0]
+    lump_candidates = by_advice["REC-WL-ADV2"].advice_lines[0].candidates
+    near_candidates = by_advice["REC-WL-ADV3"].advice_lines[0].candidates
+    candidates_ranked = (
+        typo_top.rule == "reference_near" and typo_top.strength == 90
+        and typo_top.member_record_ids == ["REC-WL-1"]
+        and typo_top.delta == 0.0
+        and any(
+            c.rule == "combined_sum"
+            and c.member_record_ids == ["REC-WL-2", "REC-WL-3"]
+            and c.member_total == 500.00
+            for c in lump_candidates
+        )
+        and len(near_candidates) == 1
+        and near_candidates[0].rule == "near_amount"
+        and near_candidates[0].delta == -3.00
+        and pile.entries[0].advice_record_id == "REC-WL-ADV1"
+        and by_advice["REC-WL-ADV4"].best_strength == 0
+    )
+    suggestions_inert = (
+        all(
+            wl.store.get(r).payment_confirmation is None
+            for r in ("REC-WL-1", "REC-WL-2", "REC-WL-3", "REC-WL-4")
+        )
+        and len(wl.store.list_confirmations()) == 4
+        and len(wl.advice_worklist().entries) == 4
+    )
+
+    linked_typo = wl.link_confirmation(
+        typo_held.confirmation_id, "Eval Controller",
+        [{"advice_line": 0, "run_id": wl_run.run_id,
+          "record_ids": ["REC-WL-1"]}],
+        rule="reference_near",
+    )
+    accepted_typo = wl.decide_confirmation(
+        linked_typo.confirmation_id, "accept", "Eval Controller",
+        "typo verified against the bank file",
+    )
+    # Read before the lump link: a confirmation classifies
+    # every member of its run, so a later confirmation of the
+    # same run re-states the members it does not cover — the
+    # overlay follows the latest confirmation, as ever.
+    typo_overlay_holds = (
+        wl.store.get("REC-WL-1").payment_confirmation == "CONFIRMED"
+    )
+    linked_lump = wl.link_confirmation(
+        lump_held.confirmation_id, "Eval Controller",
+        [{"advice_line": 0, "run_id": wl_run.run_id,
+          "record_ids": ["REC-WL-2", "REC-WL-3"]}],
+        rule="combined_sum",
+    )
+    link_settles = (
+        linked_typo.linked_rule == "reference_near"
+        and linked_typo.linked_from == typo_held.confirmation_id
+        and accepted_typo.status == "ACCEPTED"
+        and typo_overlay_holds
+        and {
+            line.member_record_id for line in linked_lump.lines
+            if line.classification == "paid_as_proposed"
+        } == {"REC-WL-2", "REC-WL-3"}
+        and wl.store.get("REC-WL-2").payment_confirmation == "CONFIRMED"
+        and wl.store.get("REC-WL-3").payment_confirmation == "CONFIRMED"
+    )
+
+    linked_near = wl.link_confirmation(
+        near_held.confirmation_id, "Eval Controller",
+        [{"advice_line": 0, "run_id": wl_run.run_id,
+          "record_ids": ["REC-WL-4"]}],
+        rule="near_amount",
+    )
+    (near_line,) = [
+        line for line in linked_near.lines
+        if line.member_record_id == "REC-WL-4"
+    ]
+    near_link_short = (
+        near_line.classification == "short_paid"
+        and near_line.difference == -3.00
+        and wl.store.get("REC-WL-4").payment_confirmation == "SHORT_PAID"
+    )
+
+    marked = wl.mark_advice_not_ours(
+        foreign_held.confirmation_id, "Eval Controller",
+        "the advice belongs to another company's batch at the same bank",
+    )
+    not_ours_closes = (
+        marked.status == "NOT_OURS"
+        and marked.not_ours is not None
+        and marked.not_ours.actor == "Eval Controller"
+        and wl.advice_worklist().entries == []
+    )
+    worklist_results = {
+        "candidates_ranked_and_rule_named": candidates_ranked,
+        "suggestions_confirm_nothing": suggestions_inert,
+        "link_settles_lines": link_settles,
+        "near_link_classifies_short": near_link_short,
+        "not_ours_closes_the_item": not_ours_closes,
+    }
+
     total_cases = len(cases)
     passed = sum(1 for c in cases if c["passed"])
     results = {
@@ -1599,6 +1768,7 @@ def evaluate(service: ApService) -> dict:
         "partial_payments": partial_results,
         "po_coverage": coverage_results,
         "bank_history": bank_results,
+        "advice_worklist": worklist_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
@@ -1691,6 +1861,16 @@ def evaluate(service: ApService) -> dict:
             bank_results["decided_records_and_history_stand"],
         "bank_history_readers_carry_the_version":
             bank_results["readers_carry_the_version"],
+        "worklist_candidates_ranked_and_rule_named":
+            worklist_results["candidates_ranked_and_rule_named"],
+        "worklist_suggestions_confirm_nothing":
+            worklist_results["suggestions_confirm_nothing"],
+        "worklist_link_settles_lines":
+            worklist_results["link_settles_lines"],
+        "worklist_near_link_classifies_short":
+            worklist_results["near_link_classifies_short"],
+        "worklist_not_ours_closes_the_item":
+            worklist_results["not_ours_closes_the_item"],
     }
     results["gate_passed"] = all(results["gates"].values())
     return results
