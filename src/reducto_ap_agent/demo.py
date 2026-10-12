@@ -34,7 +34,11 @@ paid in parts: a fresh Harborlight bill taken at 60% by one
 run and the remaining 40% by the next, standing PART_PAID in
 between, with an overcommit refused by name on the way and
 every reader — packet, position, ledger — landing on the
-same figures at each step.
+same figures at each step — and finally PO coverage: every
+order's accumulated approved billing against the total the
+order register states, the orders this world has together
+billed past their totals ranked at the top, and the note the
+crossing approval left on its record.
 """
 
 from __future__ import annotations
@@ -458,6 +462,37 @@ def run_demo() -> ApService:
           f"open {_open_amount(settled):.2f}; the position discloses it "
           "as fully paid, and a resend of it would be held on the "
           "900.00 the two runs instructed together")
+
+    print("\nPO coverage — what has been billed against each order, "
+          "in total (the accumulation no single match could see):")
+    coverage = service.po_coverage()
+    for row in coverage.orders:
+        if not row.lines and row.state == "WITHIN":
+            continue
+        pct = f"{row.pct:.1f}%" if row.pct is not None else "—"
+        total = (f"{row.total:.2f}" if row.total is not None
+                 else "not on file")
+        print(f"  {row.state:<9} {row.po_number} ({row.supplier_name}) "
+              f"— billed {row.currency} {row.billed:>9.2f} of {total} "
+              f"· {pct}")
+        for line in row.lines:
+            print(f"    {line.invoice_number:<9} bills "
+                  f"{line.billable:>8.2f} (face {line.face:.2f} − "
+                  f"credits {line.credits:.2f}) — cumulative "
+                  f"{line.cumulative_billed:.2f}")
+    quiet = sum(
+        1 for r in coverage.orders if not r.lines and r.state == "WITHIN"
+    )
+    print(f"  …and {quiet} orders with nothing billed against them, "
+          "WITHIN at 0.0%.")
+    noted = service.get_record("REC-SUB-030-0")
+    for entry in noted.audit:
+        if entry["event"] == "po_coverage_at_decision":
+            print(f"  On INV-3001's record, from the moment of its "
+                  f"approval: {entry['detail']}")
+    print("  No approval above was blocked by any of this — coverage "
+          "informs the gate. What it removes is the ability to say "
+          "the accumulation was never shown.")
 
     return service
 
