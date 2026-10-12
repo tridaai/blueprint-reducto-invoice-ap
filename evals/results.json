@@ -61,7 +61,7 @@
     "buckets_exact": true,
     "undated_named": true,
     "tie_holds": true,
-    "state_split_sums": false,
+    "state_split_sums": true,
     "tie_break_named": true
   },
   "supplier_ledger": {
@@ -86,6 +86,14 @@
     "readers_agree_at_the_end": true,
     "confirmation_answers_the_part_line": true,
     "watch_holds_on_cumulative_evidence": true
+  },
+  "po_coverage": {
+    "cumulative_states_exact": true,
+    "credits_reduce_payments_do_not": true,
+    "unapproved_excluded_unmeasured_listed": true,
+    "record_fact_counts_the_invoice": true,
+    "ranking_worst_first_unmeasured_last": true,
+    "crossing_informs_never_blocks": true
   },
   "failures": [],
   "gates": {
@@ -113,7 +121,7 @@
     "position_buckets_exact": true,
     "position_undated_named": true,
     "position_ties_to_packet": true,
-    "position_state_split_sums": false,
+    "position_state_split_sums": true,
     "position_tie_break_named": true,
     "ledger_totals_tie_to_position": true,
     "ledger_unmatched_listed_nowhere_else": true,
@@ -127,7 +135,13 @@
     "partial_payment_overcommit_refused": true,
     "partial_payment_credit_on_remainder": true,
     "partial_payment_position_and_ledger_agree": true,
-    "partial_payment_confirmation_and_watch": true
+    "partial_payment_confirmation_and_watch": true,
+    "coverage_cumulative_states_exact": true,
+    "coverage_credits_reduce_payments_do_not": true,
+    "coverage_unapproved_excluded_unmeasured_listed": true,
+    "coverage_record_fact_counts_the_invoice": true,
+    "coverage_ranking_worst_first_unmeasured_last": true,
+    "coverage_crossing_informs_never_blocks": true
   },
-  "gate_passed": false
+  "gate_passed": true
 }

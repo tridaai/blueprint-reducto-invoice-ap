@@ -84,6 +84,22 @@ Gates (a failure exits non-zero):
   600 = 2000 − 200 — with each export instructing only its
   own part; and resends are held on the cumulative instructed
   figure, 1200.00 after the first run and 1800.00 after both.
+- PO coverage — the accumulation the match cannot see, on a
+  planted service (the position scenario's idiom): three
+  approved invoices against one order cross WITHIN → WATCH →
+  EXCEEDED with hand-derived cumulatives; a credit applied
+  to a member reduces billed (1150.00 back to exactly the
+  1000.00 total — WATCH, not EXCEEDED), a released part
+  payment against a member reduces it not at all; an
+  unapproved invoice and one naming no order contribute
+  nothing, and an order no register carries reads UNMEASURED
+  with its billed sum, ranked last; the per-record fact
+  counts an awaiting invoice in ("billed at 120.0% including
+  this invoice"); and on the main service the world's own
+  pair — INV-1010 and INV-3001, each billing PO-6010's whole
+  600.00 — stands EXCEEDED at 200.0%, the second invoice's
+  approval unblocked, its match untouched, and its record
+  carrying the decision-time coverage note.
 - paid-duplicate watch — the duplicate that arrives second:
   on the main service, an invoice released in a run is
   re-submitted verbatim and held on the paid evidence (run,
@@ -128,6 +144,7 @@ from reducto_ap_agent.schemas import (  # noqa: E402
     ExtractedDocument,
     ExtractedField,
     LineItem,
+    PaymentEntry,
     PaymentRun,
     PaymentRunLine,
     RemittanceLine,
@@ -1222,6 +1239,165 @@ def evaluate(service: ApService) -> dict:
         "watch_holds_on_cumulative_evidence": watch_cumulative,
     }
 
+    # -- PO coverage ------------------------------------------
+    # Its own service and planted records (the position
+    # scenario's idiom), so the cumulatives against PO-6003
+    # (Dunmore, register total 1000.00) are exact: 500.00
+    # WITHIN, +350.00 WATCH at 85%, +300.00 EXCEEDED at 115%.
+    coverage_service = build_offline_service()
+    s04 = world.supplier("SUP-04")
+
+    def cov_plant(record_id, number, po, total, *,
+                  status="APPROVED", currency="USD"):
+        fields = {
+            "invoice_number": ExtractedField(value=number),
+            "invoice_date": ExtractedField(value="2026-09-01"),
+            "total": ExtractedField(value=total),
+        }
+        if po is not None:
+            fields["po_reference"] = ExtractedField(value=po)
+        coverage_service.store.save(DocumentRecord(
+            record_id=record_id, submission_id="SUB-EV-COV",
+            supplier_id="SUP-04", supplier_name=s04.name,
+            status=status, doc_class="invoice",
+            extraction=ExtractedDocument(
+                doc_class="invoice", fields=fields, currency=currency),
+        ))
+
+    def cov_row(po_number):
+        return next(
+            r for r in coverage_service.po_coverage().orders
+            if r.po_number == po_number
+        )
+
+    cov_plant("REC-EV-K1", "INV-EV-K1", "PO-6003", 500.00)
+    stage_within = cov_row("PO-6003")
+    cov_plant("REC-EV-K2", "INV-EV-K2", "PO-6003", 350.00)
+    stage_watch = cov_row("PO-6003")
+    cov_plant("REC-EV-K3", "INV-EV-K3", "PO-6003", 300.00)
+    stage_exceeded = cov_row("PO-6003")
+    cumulative_states = (
+        (stage_within.billed, stage_within.pct, stage_within.state)
+        == (500.00, 50.0, "WITHIN")
+        and (stage_watch.billed, stage_watch.pct, stage_watch.state)
+        == (850.00, 85.0, "WATCH")
+        and (stage_exceeded.billed, stage_exceeded.pct,
+             stage_exceeded.state) == (1150.00, 115.0, "EXCEEDED")
+        and [l.cumulative_billed for l in stage_exceeded.lines]
+        == [500.00, 850.00, 1150.00]
+        and [l.invoice_number for l in stage_exceeded.lines]
+        == ["INV-EV-K1", "INV-EV-K2", "INV-EV-K3"]
+        and stage_exceeded.total == 1000.00
+        and stage_exceeded.total_source == "ORDER_REGISTER"
+    )
+
+    # A credit lands on the second invoice: billed falls by
+    # exactly the credit, back to the order's total — fully
+    # billed (WATCH at 100.0%), no longer exceeded. A released
+    # part payment against the first invoice settles money
+    # without un-billing any of it.
+    k2 = coverage_service.get_record("REC-EV-K2")
+    k2.credits_applied.append(CreditApplication(
+        credit_record_id="REC-EV-K2-CR", credit_number="CN-EV-K2",
+        invoice_record_id="REC-EV-K2", amount=150.00,
+        currency="USD", actor="Eval Controller"))
+    coverage_service.store.save(k2)
+    after_credit = cov_row("PO-6003")
+    k1 = coverage_service.get_record("REC-EV-K1")
+    k1.payments_applied.append(PaymentEntry(
+        run_id="RUN-EV-K1", amount=400.00, currency="USD",
+        actor="Eval Treasurer"))
+    coverage_service.store.save(k1)
+    after_payment = cov_row("PO-6003")
+    credits_reduce_payments_dont = (
+        (after_credit.billed, after_credit.pct, after_credit.state)
+        == (1000.00, 100.0, "WATCH")
+        and after_payment.billed == 1000.00
+        and [l.billable for l in after_payment.lines]
+        == [500.00, 200.00, 300.00]
+    )
+
+    # Money that is not approved bills nothing, an invoice
+    # naming no order bills nothing anywhere, and an order
+    # the register does not carry is measured against
+    # nothing: UNMEASURED, its billed sum listed, ranked last.
+    cov_plant("REC-EV-K4", "INV-EV-K4", "PO-6003", 200.00,
+              status="AWAITING_APPROVER")
+    cov_plant("REC-EV-K5", "INV-EV-K5", None, 9999.00)
+    cov_plant("REC-EV-K6", "INV-EV-K6", "PO-9997", 275.00)
+    end_report = coverage_service.po_coverage()
+    unmeasured = cov_row("PO-9997")
+    unapproved_and_unmeasured = (
+        cov_row("PO-6003").billed == 1000.00
+        and unmeasured.state == "UNMEASURED"
+        and unmeasured.total is None and unmeasured.pct is None
+        and unmeasured.billed == 275.00
+        and end_report.orders[-1].po_number == "PO-9997"
+    )
+
+    # The fact for the awaiting invoice counts it in: the
+    # approver reads 120.0% — EXCEEDED — before deciding.
+    k4_fact = coverage_service.record_coverage("REC-EV-K4")
+    record_fact = (
+        k4_fact.counted is False
+        and (k4_fact.billed, k4_fact.billed_including)
+        == (1000.00, 1200.00)
+        and (k4_fact.pct, k4_fact.state) == (120.0, "EXCEEDED")
+        and "120.0%" in k4_fact.fact
+        and "including this invoice" in k4_fact.fact
+    )
+
+    # Ranking: an order billed to four times its total leads;
+    # the unmeasured order closes the list.
+    cov_plant("REC-EV-K7", "INV-EV-K7", "PO-6004", 1200.00)
+    ranked = coverage_service.po_coverage().orders
+    ranking_holds = (
+        ranked[0].po_number == "PO-6004"
+        and ranked[0].state == "EXCEEDED"
+        and ranked[0].pct == 400.0
+        and ranked[-1].po_number == "PO-9997"
+        and next(i for i, r in enumerate(ranked)
+                 if r.po_number == "PO-6003")
+        < next(i for i, r in enumerate(ranked)
+               if r.state == "WITHIN")
+    )
+
+    # On the main service, the world's own pair: INV-1010 and
+    # INV-3001 each bill PO-6010's whole 600.00. The second
+    # approval (recorded in the credit section above) was
+    # taken with the order at 200.0% — unblocked, its match
+    # untouched, and the fact on its record.
+    main_row = next(
+        r for r in service.po_coverage().orders
+        if r.po_number == "PO-6010"
+    )
+    inv3001 = service.get_record("REC-SUB-030-0")
+    crossing_informs = (
+        (main_row.billed, main_row.pct, main_row.state)
+        == (1200.00, 200.0, "EXCEEDED")
+        and [(l.record_id, l.billable, l.cumulative_billed)
+             for l in main_row.lines]
+        == [("REC-SUB-010-0", 600.00, 600.00),
+            ("REC-SUB-030-0", 600.00, 1200.00)]
+        and inv3001.status == "APPROVED"
+        and inv3001.match is not None
+        and inv3001.match.status == "MATCHED"
+        and any(
+            a["event"] == "po_coverage_at_decision"
+            and "PO-6010" in a["detail"] and "200.0%" in a["detail"]
+            for a in inv3001.audit
+        )
+    )
+    coverage_results = {
+        "cumulative_states_exact": cumulative_states,
+        "credits_reduce_payments_do_not": credits_reduce_payments_dont,
+        "unapproved_excluded_unmeasured_listed":
+            unapproved_and_unmeasured,
+        "record_fact_counts_the_invoice": record_fact,
+        "ranking_worst_first_unmeasured_last": ranking_holds,
+        "crossing_informs_never_blocks": crossing_informs,
+    }
+
     total_cases = len(cases)
     passed = sum(1 for c in cases if c["passed"])
     results = {
@@ -1247,6 +1423,7 @@ def evaluate(service: ApService) -> dict:
         "supplier_ledger": ledger_results,
         "paid_duplicate_watch": watch_results,
         "partial_payments": partial_results,
+        "po_coverage": coverage_results,
         "failures": [c for c in cases if not c["passed"]],
     }
     results["gates"] = {
@@ -1319,6 +1496,18 @@ def evaluate(service: ApService) -> dict:
             partial_results["confirmation_answers_the_part_line"]
             and partial_results["watch_holds_on_cumulative_evidence"]
         ),
+        "coverage_cumulative_states_exact":
+            coverage_results["cumulative_states_exact"],
+        "coverage_credits_reduce_payments_do_not":
+            coverage_results["credits_reduce_payments_do_not"],
+        "coverage_unapproved_excluded_unmeasured_listed":
+            coverage_results["unapproved_excluded_unmeasured_listed"],
+        "coverage_record_fact_counts_the_invoice":
+            coverage_results["record_fact_counts_the_invoice"],
+        "coverage_ranking_worst_first_unmeasured_last":
+            coverage_results["ranking_worst_first_unmeasured_last"],
+        "coverage_crossing_informs_never_blocks":
+            coverage_results["crossing_informs_never_blocks"],
     }
     results["gate_passed"] = all(results["gates"].values())
     return results
