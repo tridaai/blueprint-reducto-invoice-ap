@@ -60,6 +60,7 @@
   .rc-amount_disagrees, .rc-duplicates_within_statement { color: var(--warn); font-weight: 600; }
   .rc-missing_in_ap, .rc-missing_on_statement { color: var(--bad); font-weight: 600; }
   .st-UNMATCHED { color: var(--warn); }
+  .st-NOT_OURS { color: var(--bad); }
   .cf-paid_as_proposed { color: var(--ok); font-weight: 600; }
   .cf-short_paid, .cf-over_paid { color: var(--warn); font-weight: 600; }
   .cf-missing, .cf-unexpected_line { color: var(--bad); font-weight: 600; }
@@ -146,6 +147,9 @@
     <p class="note" style="margin-top:0;">A released run is a proposal. The bank answers it with a remittance advice, and confirmation reconciles that answer line by line — exactly, never within a tolerance: paid as proposed, short, over, missing, or a line for an invoice the run never contained. An advice that names no run on file is held unmatched, never guessed onto one. Confirmation is evidence; it changes no run, no export, and no approval.</p>
     <div id="confirm-advices" class="note">No remittance advices yet — load the demo world.</div>
     <div id="confirm-list"></div>
+    <h2 style="margin-top:22px;">The unmatched pile — the worklist</h2>
+    <p class="note" style="margin-top:0;">Held advices, worked by a person. The arithmetic suggests what each line might answer — an exact line the advice failed to name, a reference one edit from an invoice number, one lump covering several lines of a run, an amount exact with no reference to stand on, an amount near a line the reference names — and a suggestion confirms nothing: only a controller's link settles lines, under the same exact rule as any confirmation, and a controller may instead mark an advice not ours, with the reason on the record.</p>
+    <div id="worklist" class="note">The pile is empty — every advice on file has been answered for.</div>
   </section>
 </div>
 <div style="padding: 0 28px 8px;">
@@ -522,6 +526,8 @@ async function loadConfirmations() {
     let html = `<h2 style="margin-top:18px;">${cf.confirmation_id} — ${cf.run_id ? "answers " + cf.run_id : "held unmatched"} · advice ${cf.advice_record_id}</h2>
       <p class="note">Status <span class="status st-${cf.status}">${cf.status}</span>${cf.run_id ? ` · totals tie: ${cf.totals_tie ? "yes" : "NO"} · ${counts}` : ""}</p>`;
     if (cf.unmatched_reason) html += `<p class="flag">⚠ Held unmatched: ${cf.unmatched_reason}</p>`;
+    if (cf.linked_by) html += `<p class="note">Linked by ${cf.linked_by} under ${cf.linked_rule}, from held ${cf.linked_from} — a controller's act from the worklist, not a match the advice made on its own.</p>`;
+    if (cf.not_ours) html += `<p class="flag">⚠ Marked NOT_OURS by ${cf.not_ours.actor} — ${cf.not_ours.reason}</p>`;
     (cf.flags || []).forEach(f => html += `<p class="flag">⚠ ${f}</p>`);
     (cf.notes || []).forEach(n => html += `<p class="note">${n}</p>`);
     if (cf.lines.length)
@@ -554,6 +560,63 @@ async function loadConfirmations() {
       } catch (e) { $("cf-error-" + id).textContent = e.message; }
     });
   });
+  await loadWorklist();
+}
+
+async function loadWorklist() {
+  const host = $("worklist");
+  let worklist;
+  try { worklist = await api("/confirmations/worklist"); }
+  catch (e) { host.textContent = e.message; return; }
+  if (!worklist.entries.length) {
+    host.className = "note";
+    host.innerHTML = "The pile is empty — every advice on file has been answered for.";
+    return;
+  }
+  host.className = "";
+  host.innerHTML = `<p class="note">${worklist.ranking_rule}</p>` + worklist.entries.map(e => {
+    let html = `<h2 style="margin-top:16px;">${e.confirmation_id} — advice ${e.advice_record_id}${e.best_strength ? ` · best candidate strength ${e.best_strength}` : " · no candidates"}</h2>
+      <p class="note">Held: ${e.unmatched_reason}</p>`;
+    e.advice_lines.forEach(line => {
+      html += `<p class="note" style="margin-top:8px;">Line ${line.index}: “${line.invoice_number}” · ${money(line.amount_paid)} ${line.currency}${line.bank_reference ? " · bank ref " + line.bank_reference : ""}</p>`;
+      if (!line.candidates.length) { html += `<p class="note">No candidates — nothing unsettled resembles it.</p>`; return; }
+      html += `<table><thead><tr><th>Rule</th><th>Strength</th><th>Run</th><th>Members</th><th>Member total</th><th>Δ</th><th>Why</th><th></th></tr></thead><tbody>`
+        + line.candidates.map(c => `<tr><td>${c.rule}</td><td>${c.strength}</td><td>${c.run_id}</td><td>${c.member_invoice_numbers.join(", ")}</td><td>${money(c.member_total)}</td><td>${c.delta === null ? "—" : money(c.delta)}</td><td class="note">${c.note}</td><td><button class="secondary" data-wl-link="${e.confirmation_id}" data-wl-line="${line.index}" data-wl-run="${c.run_id}" data-wl-records="${c.member_record_ids.join(",")}" data-wl-rule="${c.rule}">Link</button></td></tr>`).join("")
+        + `</tbody></table>`;
+    });
+    html += `<div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+      <input id="wl-actor-${e.confirmation_id}" placeholder="Controller name (required)">
+      <input id="wl-reason-${e.confirmation_id}" placeholder="Not-ours reason (required to mark)">
+      <button class="secondary" data-wl-notours="${e.confirmation_id}">Mark not ours</button></div>
+      <p class="note" id="wl-error-${e.confirmation_id}"></p>`;
+    return html;
+  }).join("");
+  host.querySelectorAll("button[data-wl-link]").forEach(b =>
+    b.addEventListener("click", async () => {
+      const id = b.dataset.wlLink;
+      try {
+        await api(`/confirmations/${id}/link`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            actor: $("wl-actor-" + id).value,
+            rule: b.dataset.wlRule,
+            links: [{advice_line: Number(b.dataset.wlLine), run_id: b.dataset.wlRun, record_ids: b.dataset.wlRecords.split(",")}],
+          }),
+        });
+        await loadConfirmations(); await loadRecords();
+      } catch (err) { $("wl-error-" + id).textContent = err.message; }
+    }));
+  host.querySelectorAll("button[data-wl-notours]").forEach(b =>
+    b.addEventListener("click", async () => {
+      const id = b.dataset.wlNotours;
+      try {
+        await api(`/confirmations/${id}/not-ours`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({actor: $("wl-actor-" + id).value, reason: $("wl-reason-" + id).value}),
+        });
+        await loadConfirmations(); await loadRecords();
+      } catch (err) { $("wl-error-" + id).textContent = err.message; }
+    }));
 }
 
 async function loadWatch() {

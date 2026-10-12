@@ -74,6 +74,19 @@ def main(argv: list[str] | None = None) -> int:
     p_confirm = sub.add_parser("confirm", help="reconcile one remittance advice against the payment run it answers")
     p_confirm.add_argument("record_id")
     sub.add_parser("confirmations", help="list remittance confirmations as JSON")
+    sub.add_parser("worklist", help="print the unmatched-advice worklist: every held advice with the candidates computed for it")
+    p_link = sub.add_parser("link-confirmation", help="a controller links one held advice to a released run: --pair ADVICE_LINE:RECORD_ID[,RECORD_ID...] repeated, all against --run")
+    p_link.add_argument("confirmation_id")
+    p_link.add_argument("--run", required=True, help="the released run the advice is tied to")
+    p_link.add_argument("--pair", action="append", required=True,
+                        help="ADVICE_LINE:RECORD_ID[,RECORD_ID...] — one per advice line being linked")
+    p_link.add_argument("--actor", required=True, help="the controller who links")
+    p_link.add_argument("--rule", default="manual",
+                        help="the candidate rule the link follows, or manual (default)")
+    p_notours = sub.add_parser("not-ours", help="a controller marks one held advice not ours, with the reason")
+    p_notours.add_argument("confirmation_id")
+    p_notours.add_argument("--actor", required=True)
+    p_notours.add_argument("--reason", required=True)
     p_position = sub.add_parser("position", help="print the AP position aged as of a date (JSON), tied to the packet")
     p_position.add_argument("as_of", help="the close date, YYYY-MM-DD — ageing is explicit, never a hidden today")
     p_position.add_argument("--export", action="store_true",
@@ -174,6 +187,25 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(
                 [c.model_dump() for c in service.list_confirmations()], indent=2
             ))
+        elif args.command == "worklist":
+            print(service.advice_worklist().model_dump_json(indent=2))
+        elif args.command == "link-confirmation":
+            links = []
+            for pair in args.pair:
+                index, _, records = pair.partition(":")
+                links.append({
+                    "advice_line": int(index),
+                    "run_id": args.run,
+                    "record_ids": [r.strip() for r in records.split(",")
+                                   if r.strip()],
+                })
+            print(service.link_confirmation(
+                args.confirmation_id, args.actor, links, rule=args.rule
+            ).model_dump_json(indent=2))
+        elif args.command == "not-ours":
+            print(service.mark_advice_not_ours(
+                args.confirmation_id, args.actor, args.reason
+            ).model_dump_json(indent=2))
         elif args.command == "position":
             if args.export:
                 key, digest, _ = service.position_export(args.as_of)

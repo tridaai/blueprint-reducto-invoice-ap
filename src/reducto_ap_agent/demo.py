@@ -247,6 +247,51 @@ def run_demo() -> ApService:
     print("\nThe confirmation is evidence over the run. The run, its "
           "export, and every approval above are exactly as they were.")
 
+    print("\nTwo more advices arrived with the batch — one names no run "
+          "at all, one names a run that is not on file:")
+    for advice_id in ("REC-SUB-022-0", "REC-SUB-023-0"):
+        held = service.confirm_remittance(advice_id)
+        print(f"  {held.confirmation_id} — {held.status}: "
+              f"{held.unmatched_reason}")
+    print("\nHeld is not the end of them. The worklist does the "
+          "arithmetic over every unsettled line of every released run:")
+    pile = service.advice_worklist()
+    for entry in pile.entries:
+        print(f"  {entry.confirmation_id} (advice "
+              f"{entry.advice_record_id}) — best strength "
+              f"{entry.best_strength}")
+        for line in entry.advice_lines:
+            print(f"    line {line.index}: {line.invoice_number} "
+                  f"{line.amount_paid:.2f} {line.currency}")
+            for candidate in line.candidates:
+                print(f"      [{candidate.rule} · {candidate.strength}] "
+                      f"{candidate.note}")
+            if not line.candidates:
+                print("      no candidates — nothing unsettled "
+                      "resembles it")
+    print("\nThe suggestions have confirmed nothing: INV-1002 still "
+          "stands short-paid on the first advice's word. A controller "
+          "links the second advice to the run it so plainly answers:")
+    linked = service.link_confirmation(
+        "CONF-REC-SUB-023-0", "Marta Chen (controller)",
+        [{"advice_line": 0, "run_id": run.run_id,
+          "record_ids": ["REC-SUB-002-0"]}],
+        rule="exact_line",
+    )
+    for line in linked.lines:
+        if line.member_record_id == "REC-SUB-002-0":
+            print(f"  {linked.confirmation_id}: {line.invoice_number} "
+                  f"{line.classification} — linked by "
+                  f"{linked.linked_by} under {linked.linked_rule}")
+    decided_link = service.decide_confirmation(
+        linked.confirmation_id, "accept", "Marta Chen (controller)",
+        "demo: the second advice closes the short break",
+    )
+    print(f"  → {decided_link.status} by Marta Chen (controller)")
+    print("  REC-SUB-022-0 stays in the pile: no candidate, and no "
+          "controller has marked it — the pile keeps what nobody "
+          "has judged.")
+
     print("\nA late credit — CN-1003 names INV-1001, which the run above "
           "already released:")
     try:

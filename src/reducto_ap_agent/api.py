@@ -72,6 +72,25 @@ class ConfirmationDecisionRequest(BaseModel):
     note: str = ""
 
 
+class ConfirmationLinkItem(BaseModel):
+    advice_line: int  # index into the advice's paid lines
+    run_id: str
+    record_ids: list[str]  # the run members the line answers
+
+
+class ConfirmationLinkRequest(BaseModel):
+    actor: str
+    # The candidate rule the link follows, or "manual" when
+    # the lines are the controller's own choice.
+    rule: str = "manual"
+    links: list[ConfirmationLinkItem]
+
+
+class NotOursRequest(BaseModel):
+    actor: str
+    reason: str
+
+
 class ApplyCreditRequest(BaseModel):
     actor: str
 
@@ -339,6 +358,10 @@ def create_app(service: ApService | None = None) -> FastAPI:
     def list_confirmations(run_id: str | None = None) -> list[dict]:
         return [c.model_dump() for c in svc().list_confirmations(run_id=run_id)]
 
+    @app.get("/confirmations/worklist")
+    def advice_worklist() -> dict:
+        return svc().advice_worklist().model_dump()
+
     @app.get("/confirmations/{confirmation_id}")
     def get_confirmation(confirmation_id: str) -> dict:
         return svc().get_confirmation(confirmation_id).model_dump()
@@ -349,6 +372,27 @@ def create_app(service: ApService | None = None) -> FastAPI:
     ) -> dict:
         confirmation = svc().decide_confirmation(
             confirmation_id, request.action, request.actor, request.note
+        )
+        return confirmation.model_dump()
+
+    @app.post("/confirmations/{confirmation_id}/link", status_code=201)
+    def link_confirmation(
+        confirmation_id: str, request: ConfirmationLinkRequest
+    ) -> dict:
+        confirmation = svc().link_confirmation(
+            confirmation_id,
+            request.actor,
+            [link.model_dump() for link in request.links],
+            rule=request.rule,
+        )
+        return confirmation.model_dump()
+
+    @app.post("/confirmations/{confirmation_id}/not-ours")
+    def mark_advice_not_ours(
+        confirmation_id: str, request: NotOursRequest
+    ) -> dict:
+        confirmation = svc().mark_advice_not_ours(
+            confirmation_id, request.actor, request.reason
         )
         return confirmation.model_dump()
 
