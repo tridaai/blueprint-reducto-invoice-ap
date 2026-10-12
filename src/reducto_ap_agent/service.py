@@ -58,16 +58,25 @@ gate discipline:
   Coverage never blocks the gate; the record simply shows,
   permanently, that the approver decided with the fact in
   front of them.
+- the supplier master's bank details are versioned
+  (bankmaster.py): a legitimate bank change is recorded here,
+  by a named actor, with the provenance it was verified from
+  and the date it takes effect — append-only, so the master
+  can say what it held on any past date. The fraud screen
+  judges each invoice against the version in force on the
+  invoice's own date; a decided record's stamped flags are
+  history and are never re-judged when a new version lands.
 """
 
 from __future__ import annotations
 
 import base64
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from langgraph.types import Command
 
+from .bankmaster import build_history, version_at
 from .confirmations import (
     OVERLAY_BY_CLASS,
     reconcile_confirmation,
@@ -90,6 +99,7 @@ from .errors import (
     CoverageError,
     CreditError,
     GateError,
+    MasterError,
     PaymentRunError,
     ReconciliationError,
     RecordNotFound,
@@ -97,6 +107,7 @@ from .errors import (
 from .coverage import build_coverage, po_reference_of
 from .coverage import record_coverage as _coverage_fact
 from .graph import ApPipeline, apply_gate_decision
+from .guardrails import normalise_account
 from .ledger import build_index, build_ledger
 from .payments import (
     PAYABLE_CLASSES,
@@ -108,6 +119,8 @@ from .payments import (
 from .position import build_position, export_key_for_position, position_csv
 from .reconciliation import reconcile_statement
 from .schemas import (
+    BankHistory,
+    BankVersion,
     ControllerDecision,
     CoverageReport,
     DocumentRecord,
@@ -664,6 +677,130 @@ class ApService:
             self.store.reference.purchase_orders,
         )
 
+    # -- the supplier master's bank history ----------------------
+
+    def record_bank_version(
+        self,
+        supplier_id: str,
+        bank_account: str,
+        bank_name: str,
+        effective_from: str,
+        actor: str,
+        source: str,
+    ) -> BankVersion:
+        """Record a legitimate bank change on the supplier
+        master: a new version of one supplier's bank details,
+        effective from a stated date, appended to the series
+        and never editing what stands.
+
+        This is the act the fraud screen's doctrine points at —
+        legitimate changes are verified OUT OF BAND and recorded
+        in the master; they never ride in on an invoice. So the
+        recording must carry its provenance: who recorded it
+        (``actor``) and what it was recorded FROM (``source`` —
+        the change notice, the verified callback, the evidence
+        a human checked). A recording without either is refused
+        by name: an unattributed bank change is exactly the
+        fraud pattern, wearing a master's clothes.
+
+        Effective dates move forward only. A version takes
+        effect after every version already on file, so the
+        version in force on any date is unambiguous and no
+        recording can silently rewrite what the screen said
+        about the past; a correction to a wrongly recorded
+        version is a NEW version, not an edit. Details identical
+        to the latest version change nothing and are refused as
+        the no-op they are. Recording a version re-judges no
+        record: the screen's verdicts stand stamped on the
+        records that earned them."""
+        supplier = self.store.reference.suppliers.get(supplier_id)
+        if supplier is None:
+            raise RecordNotFound(
+                f"no supplier {supplier_id} on the supplier master"
+            )
+        if not actor or not actor.strip():
+            raise MasterError(
+                "recording a bank version must name who recorded "
+                "it — a bank change with no name on it is not a "
+                "master record, it is a rumour"
+            )
+        if not source or not source.strip():
+            raise MasterError(
+                "recording a bank version must state what it was "
+                "recorded from — bank details are verified out of "
+                "band, and the source is the record of that "
+                "verification (the supplier's change notice, the "
+                "verified callback); without it the change is "
+                "unprovenanced and refused"
+            )
+        if not bank_account or not bank_account.strip():
+            raise MasterError(
+                "a bank version must state the account — the "
+                "master never holds an empty account"
+            )
+        effective_from = (effective_from or "").strip()
+        try:
+            effective_from = date.fromisoformat(effective_from).isoformat()
+        except ValueError:
+            raise MasterError(
+                "a bank version must state the date it takes "
+                f"effect, as an ISO date — got {effective_from!r}; "
+                "the fraud screen judges invoices as of their own "
+                "dates, so an undated change could bless or damn "
+                "documents it was never about"
+            ) from None
+        series = self.store.reference.bank_versions_for(supplier_id)
+        latest = series[-1]
+        dated = [v.effective_from for v in series if v.effective_from]
+        if dated and effective_from <= max(dated):
+            raise MasterError(
+                f"effective date {effective_from} does not move "
+                f"supplier {supplier_id}'s bank history forward — "
+                f"version {latest.version} already stands "
+                f"effective {max(dated)}; a new version takes "
+                "effect after it, and a correction is recorded "
+                "as a new version, never as a rewrite of a date "
+                "the screen has already judged by"
+            )
+        if normalise_account(bank_account) == normalise_account(
+            latest.bank_account
+        ) and (bank_name or "").strip() == latest.bank_name:
+            raise MasterError(
+                f"the stated details are identical to version "
+                f"{latest.version} of supplier {supplier_id}'s "
+                "bank details — a version that changes nothing "
+                "records nothing"
+            )
+        version = BankVersion(
+            version=latest.version + 1,
+            bank_account=bank_account.strip(),
+            bank_name=(bank_name or "").strip(),
+            effective_from=effective_from,
+            recorded_by=actor.strip(),
+            recorded_at=_now(),
+            source=source.strip(),
+        )
+        return self.store.reference.record_bank_version(
+            supplier_id, version)
+
+    def bank_history(self, supplier_id: str, as_of: str) -> BankHistory:
+        """One supplier's bank timeline as of ``as_of``: every
+        version in recording order — details, effective date,
+        provenance — and the version in force at that date
+        named. A read over the reference data; building it
+        writes nothing. An id that is not on the master is a
+        404, the ledger's own rule."""
+        supplier = self.store.reference.suppliers.get(supplier_id)
+        if supplier is None:
+            raise RecordNotFound(
+                f"no supplier {supplier_id} on the supplier master"
+            )
+        return build_history(
+            supplier,
+            self.store.reference.bank_versions_for(supplier_id),
+            as_of,
+        )
+
     # -- the supplier ledger -------------------------------------
 
     def supplier_index(self, as_of: str) -> SupplierIndex:
@@ -677,6 +814,7 @@ class ApService:
             self.store.list_reconciliations(),
             as_of,
             self.store.reference.purchase_orders,
+            self.store.reference.bank_versions,
         )
 
     def supplier_ledger(
@@ -700,6 +838,7 @@ class ApService:
             self.store.list_reconciliations(),
             as_of,
             self.store.reference.purchase_orders,
+            self.store.reference.bank_versions,
         )
 
     # -- payment runs ----------------------------------------------
@@ -814,8 +953,14 @@ class ApService:
         if action == "release":
             # Build and store the export BEFORE any state moves:
             # a release that cannot produce its artifact has not
-            # happened, and must not half-happen.
-            data = build_export_csv(run, self.store.reference.suppliers)
+            # happened, and must not half-happen. The export pays
+            # the bank version in force today — the master's
+            # present word for money moving now (payments.py).
+            data = build_export_csv(
+                run, self.store.reference.suppliers,
+                self.store.reference.bank_versions,
+                datetime.now(timezone.utc).date().isoformat(),
+            )
             key = export_key_for(run.run_id)
             self.pipeline.objects.put(key, data, "text/csv")
             run.export_key = key

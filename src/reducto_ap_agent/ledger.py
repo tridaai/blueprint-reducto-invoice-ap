@@ -50,8 +50,12 @@ the supplier's page. This module is that page, as a read model:
   at the ledger's stated as-of — read out of the position
   itself, so the ageing on the ledger is the ageing at close.
 - **Bank details come from the master, only.** The ledger
-  shows the master's approved account and bank. A document
-  that presented different details was held at intake with the
+  shows the master's approved account and bank — the version
+  in force at the ledger's as-of (the master is versioned:
+  bankmaster.py), with its version number and the count of
+  versions on file, so a reader can see the details have a
+  past and open the timeline for it. A document that
+  presented different details was held at intake with the
   guardrail's flag; that flag, in the guardrail's words, is
   the ledger's bank warning, with the records that raised it.
   No document's bank details are ever shown as the supplier's.
@@ -80,6 +84,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from .bankmaster import seed_version, version_at
 from .coverage import build_coverage, po_reference_of
 from .credits import (
     credit_amount,
@@ -90,6 +95,7 @@ from .credits import (
 )
 from .position import build_position
 from .schemas import (
+    BankVersion,
     DocumentRecord,
     LedgerBank,
     LedgerBreak,
@@ -139,7 +145,18 @@ def _document(record: DocumentRecord) -> LedgerDocument:
     )
 
 
-def _bank(supplier: Supplier, records: list[DocumentRecord]) -> LedgerBank:
+def _bank(
+    supplier: Supplier,
+    records: list[DocumentRecord],
+    versions: list[BankVersion] | None = None,
+    as_of: str = "",
+) -> LedgerBank:
+    """The master's bank details AS OF the ledger's date: the
+    version in force then, its number, and how many versions
+    stand on file — beside the warning the stamped record
+    flags raise. Without a series passed, the supplier's seed
+    is the master's only word (version 1 of 1), the reading
+    every pre-version caller always got."""
     flags: list[str] = []
     flagged_ids: list[str] = []
     for record in records:
@@ -148,9 +165,14 @@ def _bank(supplier: Supplier, records: list[DocumentRecord]) -> LedgerBank:
             for flag in record.fraud_flags:
                 if flag not in flags:
                     flags.append(flag)
+    series = versions if versions else [seed_version(supplier)]
+    in_force = version_at(series, as_of)
     return LedgerBank(
-        bank_name=supplier.bank_name,
-        bank_account=supplier.bank_account,
+        bank_name=in_force.bank_name,
+        bank_account=in_force.bank_account,
+        bank_version=in_force.version,
+        bank_version_count=len(series),
+        effective_from=in_force.effective_from,
         warning="; ".join(flags) if flags else None,
         flags=flags,
         flagged_record_ids=flagged_ids,
@@ -188,14 +210,19 @@ def build_ledger(
     recons: list[Reconciliation],
     as_of: str,
     purchase_orders: dict[str, PurchaseOrder] | None = None,
+    bank_versions: dict[str, list[BankVersion]] | None = None,
 ) -> SupplierLedger:
     """Supplier ``supplier``'s ledger over the whole store
     snapshot. Pure: reads records and reconciliations, writes
-    nothing. ``as_of`` ages the position the totals tie to.
-    ``purchase_orders`` is the order register the coverage
-    states on the invoice rows are read from (coverage.py);
-    without it the rows still name their orders and carry no
-    state — the service always passes it."""
+    nothing. ``as_of`` ages the position the totals tie to —
+    and dates the bank reading: the version shown is the one
+    in force at ``as_of``. ``purchase_orders`` is the order
+    register the coverage states on the invoice rows are read
+    from (coverage.py); without it the rows still name their
+    orders and carry no state — the service always passes it.
+    ``bank_versions`` is the master's version series per
+    supplier (bankmaster.py); without it the bank reading is
+    the seed's, version 1 of 1."""
     own = [r for r in records if r.supplier_id == supplier.supplier_id]
     position = build_position(records, as_of)
     coverage_states = (
@@ -301,7 +328,11 @@ def build_ledger(
         supplier_name=supplier.name,
         master_currency=supplier.currency,
         as_of=position.as_of,
-        bank=_bank(supplier, own),
+        bank=_bank(
+            supplier, own,
+            (bank_versions or {}).get(supplier.supplier_id),
+            as_of,
+        ),
         documents=[_document(r) for r in own],
         invoices=invoices,
         credits=credits,
@@ -354,13 +385,15 @@ def build_index(
     recons: list[Reconciliation],
     as_of: str,
     purchase_orders: dict[str, PurchaseOrder] | None = None,
+    bank_versions: dict[str, list[BankVersion]] | None = None,
 ) -> SupplierIndex:
     """The ledger index: every master supplier with its counts,
     and the unmatched section. Pure, like the ledger itself."""
     entries: list[SupplierIndexEntry] = []
     for supplier in sorted(suppliers, key=lambda s: s.name):
         ledger = build_ledger(
-            supplier, records, recons, as_of, purchase_orders)
+            supplier, records, recons, as_of, purchase_orders,
+            bank_versions)
         counts: dict[str, int] = {}
         for doc in ledger.documents:
             counts[doc.doc_class] = counts.get(doc.doc_class, 0) + 1

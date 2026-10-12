@@ -47,7 +47,11 @@ paid somewhere new — a member line can therefore only exist
 for a record whose invoice agreed with the master or was
 approved despite no master change, and the export reads the
 master regardless, so there is no path by which an invoice's
-account reaches a bank file.)
+account reaches a bank file.) The master is versioned
+(bankmaster.py): the export pays the version in force on the
+day of release — the master's present word, not the version
+an invoice was screened against, because the export is an
+instruction about money moving now.
 """
 
 from __future__ import annotations
@@ -56,9 +60,11 @@ import csv
 import hashlib
 import io
 
+from .bankmaster import version_at
 from .credits import credited_invoice_number, open_amount, paid_amount
 from .errors import PaymentRunError
 from .schemas import (
+    BankVersion,
     DocumentRecord,
     PaymentRefusal,
     PaymentRun,
@@ -351,16 +357,29 @@ def export_key_for(run_id: str) -> str:
     return f"payment-runs/{run_id}/payment-instructions-v1.csv"
 
 
-def build_export_csv(run: PaymentRun, suppliers: dict[str, Supplier]) -> bytes:
+def build_export_csv(
+    run: PaymentRun,
+    suppliers: dict[str, Supplier],
+    bank_versions: dict[str, list[BankVersion]] | None = None,
+    as_of: str = "",
+) -> bytes:
     """The payment-instruction file for a released run.
 
-    Deterministic: same run, same bytes — member order is the
-    run's, amounts are fixed two-decimal, line endings are LF.
+    Deterministic: same run, same master, same bytes — member
+    order is the run's, amounts are fixed two-decimal, line
+    endings are LF.
 
     Bank details are read from ``suppliers`` — the supplier
     master — on purpose, never from the member records (see
-    the module docstring). A member whose supplier is not on
-    file fails the release loudly, before anything is written."""
+    the module docstring). When the master's versions are
+    passed, the details paid are the version in force at
+    ``as_of`` (the release day, the service's call): the
+    export instructs money moving now, so it takes the
+    master's present word — not the version an invoice was
+    screened against on its own date. Without versions, the
+    supplier's seeded details are the master's only word and
+    are what is paid. A member whose supplier is not on file
+    fails the release loudly, before anything is written."""
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
     writer.writerow(EXPORT_COLUMNS)
@@ -372,6 +391,13 @@ def build_export_csv(run: PaymentRun, suppliers: dict[str, Supplier]) -> bytes:
                 f"supplier {line.supplier_id!r}, who is not on file — the "
                 "export pays only accounts from the supplier master"
             )
+        bank_name, bank_account = supplier.bank_name, supplier.bank_account
+        if bank_versions is not None:
+            series = bank_versions.get(supplier.supplier_id)
+            if series:
+                in_force = version_at(series, as_of)
+                bank_name, bank_account = (
+                    in_force.bank_name, in_force.bank_account)
         writer.writerow([
             run.run_id,
             run.value_date,
@@ -379,8 +405,8 @@ def build_export_csv(run: PaymentRun, suppliers: dict[str, Supplier]) -> bytes:
             line.invoice_number,
             supplier.supplier_id,
             supplier.name,
-            supplier.bank_name,
-            supplier.bank_account,
+            bank_name,
+            bank_account,
             line.currency,
             f"{line.amount:.2f}",
         ])
