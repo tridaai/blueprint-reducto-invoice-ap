@@ -167,7 +167,9 @@ Three screens, all code, all before the gate:
 
 1. **Bank details.** The account on the invoice is compared
    (formatting-insensitively) with the supplier master's
-   approved account. Any difference → `FRAUD_REVIEW`, with the
+   approved account — the version of it in force on the
+   invoice's own date (the master is versioned: "Supplier bank
+   history" below). Any difference → `FRAUD_REVIEW`, with the
    flag text showing only masked tails. The gate *cannot*
    decide a fraud-held record — the API returns 409 — because
    the fix belongs in the supplier master after out-of-band
@@ -999,6 +1001,133 @@ total; no blocking threshold at any percentage; and no merge
 with the position — billed and owed are different ledgers, and
 a reader who wants both can put the two reports side by side,
 as the console does.
+
+## Supplier bank history
+
+`bankmaster.py` owns the master's memory; `store.py`'s
+reference data holds the series; the service exposes the
+acts and reads as `record_bank_version` / `bank_history`, the
+API as `POST /suppliers/{id}/bank-versions` and `GET
+/suppliers/{id}/bank-history`, the CLI as `record-bank-version`
+and `bank-history`, and the console shows the timeline and
+the recording form on the supplier's ledger.
+
+**Why the master needed it.** The bank screen compared an
+invoice against a single standing account. Legitimate changes
+made that comparison wrong in both directions on the same
+day: an old invoice quoting last month's genuine bank was
+flagged, and a new invoice quoting next week's genuine bank
+early — the fraud shape wearing a legitimate future — passed.
+The fix is not a smarter comparison; it is a master that can
+say what it held on a given date.
+
+**The shape.** A supplier's bank details are a list of
+`BankVersion`s in recording order: the account and bank name,
+an `effective_from` date, and provenance — `recorded_by`,
+`recorded_at`, and `source`, the statement of what the change
+was recorded from. Version 1 is the **seed**, built from the
+supplier at load: its `effective_from` is empty, which means
+*before the record* — the deployment's standing word about
+the past. The **version in force** on a date is the last
+version effective on or before it; the seed is the floor, so
+every date has a version. "Current" is that rule at the clock
+the repo already runs on (UTC stamps at the service seam);
+every reader that takes a date takes it explicitly, as
+`as_of`, exactly like the position and the ledger. There are
+**no toggles and no thresholds**: nothing here is policy,
+because nothing here is judgement — it is a record.
+
+**No confirmation state, argued from the repo's own idiom.**
+Every governed act in this system is one named actor plus a
+recorded reason: credits are applied by a named controller,
+holds are resolved by a named controller, runs are released
+by a named treasurer. None of them carries a second person's
+confirmation, because the protection is never the second
+signature — it is that the act is named, timestamped, and
+permanent. A bank version follows the same idiom, and its
+specific protection is the screen: a version blesses no
+invoice dated before its effective date, so a bad recording
+cannot launder a single document that predates it, and its
+blast radius forward is exactly the window until a correcting
+version lands. A two-person rule was considered and left out
+deliberately: it would be the only one in the system, and it
+would protect the recording, which is not where the risk
+lives — the risk lives in documents, and documents are
+screened.
+
+**The screen's four outcomes.** `guardrails.screen_bank_details`
+takes the series and the invoice date (the document's own
+issue date, from extraction — the date the record already
+carries for its age). Match the in-force version → no flag.
+Match nothing ever held → `BANK_DETAILS_CHANGED`, the legacy
+text verbatim against a one-version master — the seeded world
+screens byte-identically to before this round. Match only a
+version effective after the invoice date →
+`BANK_DETAILS_NOT_YET_EFFECTIVE`, naming the effective date.
+Match a version superseded before the invoice date →
+`BANK_DETAILS_SUPERSEDED`, naming when. (If a supplier ever
+reverts to an account it once held, a mid-window invoice is
+judged SUPERSEDED — the retired window is the sharper story.)
+A dateless invoice is judged against the latest version, and
+the function says so. Every flag still lands the record on
+`FRAUD_REVIEW`; the gate still cannot decide it; the ledger's
+bank warning still quotes the flag. Only the comparison
+gained a time dimension.
+
+**Append-only, monotonic, never re-judging.** Recording
+validates in order and appends: unknown supplier → 404;
+missing actor, missing source, missing or unparseable
+effective date, or details identical to the standing version
+→ `MasterError` (422), each named. Effective dates must move
+strictly forward — the check that makes the version in force
+on any date unambiguous, and that makes rewriting the past
+impossible by construction rather than by policy: to correct
+a version you record another one. Nothing anywhere edits or
+removes a version. And no read recomputes a verdict: the
+screen's outcome is stamped into `record.fraud_flags` at
+intake, the ledger quotes those stamps, the gate reads them,
+and recording a version changes no stored record by a byte —
+the eval pack pins a decided record's whole JSON identical
+across a later recording, as it does a held one's.
+
+**Which readers read which date.** The two surfaces that
+derive bank details on read take the version in force at
+*their* moment, and say which: the **ledger** shows the
+version in force at its `as_of`, with the version number, the
+count on file, and its effective date — so a September ledger
+and a November ledger honestly show different banks for the
+same supplier. The **payment export** pays the version in
+force on the release day: it instructs money moving now, so
+it takes the master's present word, not the version an
+invoice was screened against. `Supplier.bank_account` remains
+the seed's account — the invariant is that current details
+are always derived from the series, never read off the
+supplier row.
+
+**Storage: no migration, by the master's own precedent.**
+Bank versions are reference data. Suppliers, purchase orders,
+and receipts have always lived in the reference store —
+loaded per deployment, persisted nowhere in Postgres; the
+four migrations cover only what the pipeline writes
+(records, reconciliations, runs, confirmations). Versions
+extend that same store: seeded at load, appended by the
+recording act, held in memory exactly as the master they
+version is. A production deployment whose ERP owns the
+master loads the ERP's change history at the same seam; if a
+deployment ever needs the history to outlive the process
+independently of its ERP, that is the deployment's persistence
+decision at the seam, not a pipeline table.
+
+Deliberately not built: no bank-change *document* species —
+the world's document classes are payable-path classes, and a
+change notice is not one; provenance is the actor's statement
+of the evidence checked, in the world's own materials. No
+routing/IBAN split: the master's account has always been one
+string, and the screen's comparison is over that string. No
+retroactive re-screening of held records when a version
+lands: a fraud hold is resolved in the master out of band and
+by a fresh submission, as it always was — the history makes
+the *next* screen right, it does not rewrite the last one.
 
 ## Data services
 

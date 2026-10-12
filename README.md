@@ -138,12 +138,13 @@ submission ──► intake ──► split & classify ──► extract ──�
   `QUANTITY_VARIANCE`, `TOTAL_MISMATCH`, `LINE_NOT_ON_PO`,
   `NO_PO_REFERENCE`, `PO_NOT_FOUND`, `NO_RECEIPT`,
   `DUPLICATE_INVOICE`.
-- **Guardrails as code** — the bank-detail screen (any difference
-  from the supplier master's approved account is a fraud hold),
-  the payable screen (non-invoice classes refused, reason
-  recorded), and an injection screen that fences
-  instruction-like text out of the copy of a document that
-  travels onward to any engine.
+- **Guardrails as code** — the bank-detail screen (an invoice
+  whose bank differs from the version of the supplier master
+  in force on the invoice's own date is a fraud hold — the
+  master is versioned, below), the payable screen (non-invoice
+  classes refused, reason recorded), and an injection screen
+  that fences instruction-like text out of the copy of a
+  document that travels onward to any engine.
 - **The gate** — matched records stop mid-pipeline at a
   LangGraph interrupt, checkpointed in Postgres, until a named
   approver approves or rejects with a reason. Fraud-held and
@@ -656,6 +657,71 @@ together the order stands at 200%. INV-1002 bills PO-6002 1% past its
 total, inside its line tolerances. The demo's final act prints the
 ranked view over exactly that world.
 
+## Supplier bank history
+
+The fraud screen's whole judgement used to be one sentence: *the
+invoice's bank differs from the master's*. But masters change
+legitimately, and a screen that reads only today's master makes two
+errors — it flags an invoice quoting the bank the supplier genuinely
+used last month, and it waves through an invoice quoting a bank that
+only becomes the master's next week. So the master has a past now:
+each supplier's bank details are a **series of versions** (the seeded
+details are version 1), and the screen reads the series **as of the
+invoice's own date**:
+
+- **The four outcomes are distinct and named.** An invoice matching
+  the version in force on its date is clean, however the master has
+  moved since. One matching **no version that ever existed** is held
+  `BANK_DETAILS_CHANGED` — the original judgement, unchanged. One
+  matching a version that takes effect only *after* its date is held
+  `BANK_DETAILS_NOT_YET_EFFECTIVE` — it quotes the supplier's future
+  bank early. One matching a version whose window had already closed
+  is held `BANK_DETAILS_SUPERSEDED` — it quotes the retired bank late.
+  All three holds land on `FRAUD_REVIEW` exactly as before; the gate
+  still cannot decide a fraud hold. Only the reason gained the time
+  dimension, and the audit can tell the three apart.
+- **Recording is the governed act.** A legitimate change is recorded
+  on the master (`POST /suppliers/{id}/bank-versions`,
+  `record-bank-version` on the CLI, the ledger's record form on the
+  console) with the fields every governed act in this system carries:
+  a named actor, and the provenance — what the change was recorded
+  *from* (the supplier's change notice, a verified callback: the
+  evidence a human checked out of band). No actor, no source, no
+  effective date → refused by name. There is no confirmation state:
+  recording itself is the act, as it is for credit application and
+  hold resolution here, and the as-of screen is the protection — a
+  version recorded today blesses no invoice dated before its
+  effective date, however it got in.
+- **History is append-only, and the past never moves.** Effective
+  dates move forward only — a new version takes effect after every
+  version on file, so the version in force on any date is
+  unambiguous, and a correction is a new version, never a rewrite.
+  Prior versions stand byte-identical under any later recording, and
+  **a decided record is never re-judged**: the screen's verdict is
+  stamped on the record at intake, and recording a version changes no
+  record by a byte. The surfaces that derive from the master on read
+  — the ledger's bank line, the payment export — read the version in
+  force at *their* date: the ledger shows the version in force at its
+  as-of (with its number and the count on file), and a released run
+  pays the version in force on the day of release, because the export
+  instructs money moving now. A supplier's whole timeline — details,
+  effective dates, provenance — is one read (`GET
+  /suppliers/{id}/bank-history`, `bank-history` on the CLI, the
+  timeline on the console ledger).
+- **Storage follows the master's own home.** Versions are reference
+  data, like the suppliers, orders, and receipts they version: held
+  in the reference store, seeded per deployment, written nowhere in
+  Postgres — the migration ladder covers the records the pipeline
+  writes, and the master is not one of them. In a customer
+  deployment the same seam loads the ERP's bank-change history.
+
+The seeded world plants no legitimate change — its only bank change
+is the fraud pattern, which is still caught as `BANK_DETAILS_CHANGED`
+(the as-of screen against a one-version master *is* the original
+screen). The demo's closing act stages the legitimate case: Cedarline's
+recorded change, one September invoice quoting the old bank and clean,
+one October invoice quoting the same old bank and held SUPERSEDED.
+
 ## Configuration
 
 Provider-first: the standard run is Reducto. Copy `.env.example`
@@ -795,6 +861,17 @@ gates on it:
   ranked last; and on the main service the world's own pair
   stands at 200% of PO-6010, the crossing approval unblocked,
   its match untouched, the coverage fact on its record.
+- **Bank history** — a recorded Cedarline change must judge
+  five invoices by their own dates: old bank before the
+  change clean, old bank after it held `SUPERSEDED`, new bank
+  before it held `NOT_YET_EFFECTIVE`, a never-held account
+  held `CHANGED`, new bank after it clean; recordings without
+  an actor, a source, or a date, and one rewinding the
+  series, must be refused by name; earlier versions and a
+  decided record must stand byte-identical under a later
+  recording; the ledger must show the version in force at
+  its as-of and a released run must pay the version in force
+  on release day.
 
 Live-Reducto eval runs are opt-in (`EVAL_LIVE=1` with a key)
 and reported, not gated.
@@ -815,6 +892,7 @@ src/reducto_ap_agent/
   confirmations.py remittance vs the released run, line by line, in code
   position.py      the AP position at close: ageing + the tie-out, in code
   coverage.py      PO coverage: cumulative billed per order, against its total
+  bankmaster.py    the master's bank versions: effective-dated, provenance-stamped
   ledger.py        the supplier ledger: one supplier, the whole relationship
   duplicates.py    the paid-duplicate watch: arrivals vs paid history, in code
   guardrails.py    bank-detail, payable, and injection screens
