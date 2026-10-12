@@ -101,6 +101,20 @@
     "decided_records_and_history_stand": true,
     "readers_carry_the_version": true
   },
+  "advice_worklist": {
+    "candidates_ranked_and_rule_named": true,
+    "suggestions_confirm_nothing": true,
+    "link_settles_lines": true,
+    "near_link_classifies_short": true,
+    "not_ours_closes_the_item": true
+  },
+  "new_supplier_hold": {
+    "held_with_evidence": true,
+    "gate_and_governance_refusals": true,
+    "enrolment_releases_and_judges": true,
+    "enrolled_supplier_ordinary": true,
+    "refusal_terminal": true
+  },
   "failures": [],
   "gates": {
     "match_decision_accuracy == 1.0": true,
@@ -151,7 +165,17 @@
     "bank_history_timeline_and_provenance": true,
     "bank_history_screen_outcomes_as_of_invoice_date": true,
     "bank_history_decided_records_and_history_stand": true,
-    "bank_history_readers_carry_the_version": true
+    "bank_history_readers_carry_the_version": true,
+    "worklist_candidates_ranked_and_rule_named": true,
+    "worklist_suggestions_confirm_nothing": true,
+    "worklist_link_settles_lines": true,
+    "worklist_near_link_classifies_short": true,
+    "worklist_not_ours_closes_the_item": true,
+    "new_supplier_held_with_evidence": true,
+    "new_supplier_gate_and_governance_refusals": true,
+    "new_supplier_enrolment_releases_and_judges": true,
+    "new_supplier_enrolled_is_ordinary": true,
+    "new_supplier_refusal_terminal": true
   },
   "gate_passed": true
 }
