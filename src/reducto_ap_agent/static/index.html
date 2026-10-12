@@ -50,6 +50,7 @@
   .st-EXCEPTION, .st-TOTAL_MISMATCH { color: var(--warn); }
   .st-FRAUD_REVIEW, .st-REFUSED, .st-REJECTED { color: var(--bad); }
   .st-PAID_DUPLICATE_HOLD { color: var(--bad); }
+  .st-NEW_SUPPLIER_REVIEW { color: var(--bad); }
   .st-ACCEPTED { color: var(--ok); }
   .st-AWAITING_CONTROLLER { color: var(--indigo); }
   .st-FLAGGED_BACK { color: var(--bad); }
@@ -105,7 +106,7 @@
       <select id="status-filter">
         <option value="">All statuses</option>
         <option>AWAITING_APPROVER</option><option>APPROVED</option><option>REJECTED</option>
-        <option>EXCEPTION</option><option>FRAUD_REVIEW</option><option>PAID_DUPLICATE_HOLD</option><option>REFUSED</option><option>RECEIVED</option>
+        <option>EXCEPTION</option><option>FRAUD_REVIEW</option><option>PAID_DUPLICATE_HOLD</option><option>NEW_SUPPLIER_REVIEW</option><option>REFUSED</option><option>RECEIVED</option>
       </select>
     </div>
     <table>
@@ -170,6 +171,13 @@
     <h2>Paid-duplicate watch</h2>
     <p class="note" style="margin-top:0;">The duplicate that arrives second: an invoice that answers to one already released for payment — same supplier, same number, at the paid face or the total the released runs instructed across every part payment — is held at intake on the paid evidence below. The gate cannot decide a held record; a named controller resolves the hold, with a reason, one of two ways: confirm it (the record is refused permanently) or release it as not a duplicate (it returns to the state its own match earned). Nothing here touches the original payment — there is no clawback, only a stop on the second one.</p>
     <div id="watch-list" class="note">No held duplicates — nothing on file answers to a payment already released.</div>
+  </section>
+</div>
+<div style="padding: 0 28px 8px;">
+  <section>
+    <h2>New suppliers — held at the door</h2>
+    <p class="note" style="margin-top:0;">A payable document whose supplier is not on the master stops here: its name matched no master entry exactly, and no purchase order it references resolved it. It has not been matched and has not been fraud-screened — there is no master record to screen it against — and it is not a payable: the gate cannot decide it and no run will carry it. A name that almost matches is named as a near-miss, as evidence — resemblance enrols nobody. Two exits, both a named controller's: enrol the supplier (its bank details enter the master as version 1, with the provenance they were verified from, and every held document of the identity is released back into the pipeline and judged on its own contents), or refuse a document as not a known supplier, with the reason — per document, so one bad paper does not condemn the identity's others.</p>
+    <div id="new-suppliers" class="note">The door is clear — every document on file names a supplier on the master.</div>
   </section>
 </div>
 <div style="padding: 0 28px 8px;">
@@ -372,6 +380,15 @@ async function showRecord(id) {
       html += `<p class="note">Resolution: ${h.resolution.action} by ${h.resolution.actor} — ${h.resolution.reason}</p>`;
     else
       html += `<p class="note">Unresolved — the gate cannot decide this record. Resolve it in the Paid-duplicate watch section below.</p>`;
+  }
+  if (r.supplier_hold) {
+    const h = r.supplier_hold;
+    html += `<h2 style="margin-top:14px;">New-supplier hold</h2>
+      <p class="flag">⚠ Supplier written as “${h.name_as_written}” — not on the supplier master. The name matched no master entry exactly, and no referenced purchase order resolved it.${h.near_miss_supplier_id ? ` It most resembles ${h.near_miss_supplier_name} (${h.near_miss_supplier_id}) — resemblance is evidence, never a join.` : ""} This record has not been matched and has not been fraud-screened: there is no master record to screen it against.</p>`;
+    if (h.resolution)
+      html += `<p class="note">Resolution: ${h.resolution.action} by ${h.resolution.actor} — ${h.resolution.detail}${h.resolution.supplier_id ? " · enrolled as " + h.resolution.supplier_id : ""}</p>`;
+    else
+      html += `<p class="note">Unresolved — the gate cannot decide this record. Enrol the supplier or refuse the document in the New suppliers section below.</p>`;
   }
   if (r.extraction && r.extraction.remittance_lines && r.extraction.remittance_lines.length)
     html += `<h2 style="margin-top:14px;">Remittance paid lines</h2><table><thead><tr><th>Invoice</th><th>Paid</th><th>Currency</th><th>Value date</th><th>Bank ref</th></tr></thead><tbody>`
@@ -656,6 +673,71 @@ async function loadWatch() {
   });
 }
 
+async function loadNewSuppliers() {
+  const host = $("new-suppliers");
+  let queue;
+  try { queue = await api("/new-suppliers"); }
+  catch (e) { host.textContent = e.message; return; }
+  if (!queue.groups.length) {
+    host.className = "note";
+    host.innerHTML = "The door is clear — every document on file names a supplier on the master.";
+    return;
+  }
+  host.className = "";
+  host.innerHTML = `<p class="note">${queue.note}</p>` + queue.groups.map(g => {
+    const anchor = g.record_ids[0];
+    const totals = Object.entries(g.totals_by_currency).map(([c, t]) => `${c} ${money(t)}`).join(" · ");
+    const docs = g.record_ids.map((rid, i) => `${rid}${g.document_numbers[i] ? " (" + g.document_numbers[i] + ")" : ""}`).join(", ");
+    let html = `<h2 style="margin-top:16px;">“${g.name_as_written}” — ${g.record_ids.length} document(s) held${totals ? " · " + totals : ""}</h2>
+      <p class="note">${docs}${g.held_since ? " · held since " + g.held_since : ""}</p>`;
+    if (g.near_miss_supplier_id)
+      html += `<p class="flag" style="margin:4px 0;">⚠ Near-miss: this name most resembles master supplier ${g.near_miss_supplier_name} (${g.near_miss_supplier_id}). If it is that supplier misspelled, refuse the document and have it resubmitted under the master name — do not enrol a second payee for a governed supplier.</p>`;
+    html += `<div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <input id="ns-actor-${anchor}" placeholder="Controller name (required)">
+        <input id="ns-account-${anchor}" placeholder="Bank account (required to enrol)">
+        <input id="ns-bank-${anchor}" placeholder="Bank name">
+        <input id="ns-source-${anchor}" placeholder="Verified from — provenance (required to enrol)" size="34">
+        <input id="ns-sid-${anchor}" placeholder="Supplier id (blank = next free)">
+        <button data-ns-enrol="${anchor}">Enrol supplier &amp; release</button></div>
+      <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+        <input id="ns-reason-${anchor}" placeholder="Refusal reason (required to refuse)">
+        ${g.record_ids.map(rid => `<button class="secondary" data-ns-refuse="${rid}" data-ns-anchor="${anchor}">Refuse ${rid}</button>`).join("")}
+      </div>
+      <p class="note" id="ns-error-${anchor}"></p>`;
+    return html;
+  }).join("");
+  host.querySelectorAll("button[data-ns-enrol]").forEach(b =>
+    b.addEventListener("click", async () => {
+      const anchor = b.dataset.nsEnrol;
+      try {
+        const body = {
+          actor: $("ns-actor-" + anchor).value,
+          bank_account: $("ns-account-" + anchor).value,
+          bank_name: $("ns-bank-" + anchor).value,
+          source: $("ns-source-" + anchor).value,
+        };
+        const sid = $("ns-sid-" + anchor).value.trim();
+        if (sid) body.supplier_id = sid;
+        await api(`/records/${anchor}/enrol`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(body),
+        });
+        await loadNewSuppliers(); await loadRecords(); await loadLedgers(); await loadPosition();
+      } catch (err) { $("ns-error-" + anchor).textContent = err.message; }
+    }));
+  host.querySelectorAll("button[data-ns-refuse]").forEach(b =>
+    b.addEventListener("click", async () => {
+      const anchor = b.dataset.nsAnchor;
+      try {
+        await api(`/records/${b.dataset.nsRefuse}/refuse-new-supplier`, {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({actor: $("ns-actor-" + anchor).value, reason: $("ns-reason-" + anchor).value}),
+        });
+        await loadNewSuppliers(); await loadRecords(); await loadLedgers();
+      } catch (err) { $("ns-error-" + anchor).textContent = err.message; }
+    }));
+}
+
 async function loadLedgers() {
   const asOf = $("position-as-of").value || "2026-11-15";
   const index = await api("/suppliers/index?as_of=" + asOf);
@@ -669,7 +751,7 @@ async function loadLedgers() {
       <span class="note">${counts}${open ? " · open " + open : ""}${s.open_break_count ? " · " + s.open_break_count + " open statement break(s)" : ""}${s.bank_warning ? ' · <span class="flag">⚠ bank-change warning</span>' : ""}${s.duplicate_hold_count ? ' · <span class="flag">⚠ ' + s.duplicate_hold_count + " paid-duplicate hold(s)</span>" : ""}</span></div>`;
   }).join("");
   if (index.unmatched_count)
-    html += `<p class="flag" style="margin-top:8px;">Unmatched — joined to no supplier (${index.unmatched_count}):</p>`
+    html += `<p class="flag" style="margin-top:8px;">Unmatched — joined to no supplier (${index.unmatched_count})${index.new_supplier_hold_count ? ` — of these, ${index.new_supplier_hold_count} are held at the door in NEW_SUPPLIER_REVIEW (see the new-supplier queue above)` : ""}:</p>`
       + index.unmatched.map(u => `<div class="note" style="margin-left:14px;">${u.record_id} · ${u.doc_class} · supplier written as "${u.name_as_written || "—"}" · ${u.document_number || ""} · ${money(u.total)}</div>`).join("");
   else
     html += `<p class="note" style="margin-top:8px;">Unmatched documents: none — every invoice, credit note and statement joined to the master.</p>`;
@@ -776,8 +858,8 @@ $("create-run").addEventListener("click", async () => {
   } catch (e) { $("run-error").textContent = e.message; }
 });
 
-$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadWatch(); await loadLedgers(); await loadCoverage(); });
-$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadWatch(); await loadLedgers(); await loadCoverage(); });
+$("seed").addEventListener("click", async () => { await api("/demo/seed", {method: "POST"}); await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadWatch(); await loadNewSuppliers(); await loadLedgers(); await loadCoverage(); });
+$("refresh").addEventListener("click", async () => { await loadRecords(); await loadRecons(); await loadRuns(); await loadConfirmations(); await loadPosition(); await loadWatch(); await loadNewSuppliers(); await loadLedgers(); await loadCoverage(); });
 $("load-position").addEventListener("click", async () => { await loadPosition(); await loadWatch(); await loadLedgers(); });
 $("status-filter").addEventListener("change", loadRecords);
 readiness(); loadRecords(); loadRecons(); loadRuns(); loadConfirmations(); loadPosition(); loadWatch(); loadLedgers(); loadCoverage();

@@ -24,7 +24,12 @@ supplier ledger: the whole relationship with Harborlight on
 one page, its totals tied to the position, and one stray
 document that names a supplier AP has never seen spelled that
 way, listed as unmatched rather than attached by resemblance
-— and finally the paid-duplicate watch: INV-1001 sent a second
+— where the new-supplier door stops it: the review queue
+names the master supplier it most resembles, a controller
+refuses it as the misspelling it is, and a genuinely new
+supplier's first invoice is enrolled under the bankmaster
+governance whole and released back into the pipeline to earn
+its own match fate — and finally the paid-duplicate watch: INV-1001 sent a second
 time after its run released, held on the paid evidence with
 the gate refusing to decide it, confirmed a duplicate by a
 controller; and the supplier's net re-bill, held on the NET
@@ -357,6 +362,69 @@ def run_demo() -> ApService:
     )
     print(f"  {stray.record_id} {stray.doc_class} {stray.status} — "
           f"joined supplier: {joined}")
+
+    print("\nThe new-supplier door — the stray stopped there, "
+          "unmatched and unscreened, and the review queue is "
+          "where a controller works what the door holds:")
+    queue = service.new_supplier_review()
+    for group in queue.groups:
+        miss = (
+            f"; the name most resembles {group.near_miss_supplier_name} "
+            f"({group.near_miss_supplier_id}) on the master"
+            if group.near_miss_supplier_id
+            else "; the name resembles nothing on the master"
+        )
+        print(f"  HELD {group.name_as_written!r} — "
+              f"{len(group.record_ids)} document(s){miss}")
+    refused_stray = service.refuse_new_supplier(
+        stray.record_id, controller,
+        "the name is Harborlight Marine Supply misspelled — "
+        "enrolling it would stand up a second payee for a "
+        "governed supplier; the sender was asked to resubmit "
+        "under the master name",
+    )
+    print(f"  REFUSED {refused_stray.record_id}: "
+          f"{refused_stray.refusal_reason}")
+    print("\nAnd a supplier who is genuinely new — Northbeam "
+          "Fasteners, first invoice, no purchase order yet:")
+    northbeam_text = _doc("INVOICE", 1, [
+        ("Supplier", "Northbeam Fasteners Ltd"),
+        ("Invoice Number", "INV-7701"),
+        ("Invoice Date", "2026-09-14"),
+        ("Due Date", "2026-10-14"),
+        ("Currency", "USD"),
+        ("Bank Account", "US00 NBEA 1212 3434 5656"),
+        ("Subtotal", "250.00"), ("Tax", "0.00"), ("Total", "250.00"),
+    ], [LineItem(sku="SKU-Z1", description="Hex bolts", quantity=10,
+                 unit_price=25.00, amount=250.00)])
+    (northbeam,) = service.submit(
+        "SUB-DEMO-NEW", "sub-demo-new.pdf",
+        northbeam_text.encode("utf-8"), "text/plain",
+    )
+    print(f"  {northbeam.record_id} {northbeam.doc_class} "
+          f"{northbeam.status} — a first payee: the highest-risk "
+          "arrival in AP, and the one that used to wash up as a "
+          "plain match exception")
+    enrolment = service.enrol_new_supplier(
+        northbeam.record_id, controller,
+        bank_account="US00 NBEA 1212 3434 5656",
+        bank_name="Northbeam Bank",
+        source=("onboarding pack verified by callback to the "
+                "number on file"),
+    )
+    released = service.get_record(northbeam.record_id)
+    codes = ", ".join(released.match.exception_codes) \
+        if released.match else ""
+    print(f"  ENROLLED {enrolment.supplier.supplier_id} "
+          f"{enrolment.supplier.name} by {controller} — its bank "
+          "details stand on the master as version 1, recorded "
+          "from the onboarding pack, and every standing "
+          "supplier's record is untouched")
+    print(f"  RELEASED {released.record_id} → {released.status}"
+          f" [{codes}] — enrolment answered who may be paid; "
+          "the match still asks what for, and this invoice "
+          "names no purchase order. It goes back for one, "
+          "exactly like a governed supplier's would.")
 
     print("\nThe supplier ledger — Harborlight Marine Supply (SUP-08), "
           "the whole relationship on one page:")
