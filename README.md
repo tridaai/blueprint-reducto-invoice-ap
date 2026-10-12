@@ -142,9 +142,12 @@ submission ──► intake ──► split & classify ──► extract ──�
   whose bank differs from the version of the supplier master
   in force on the invoice's own date is a fraud hold — the
   master is versioned, below), the payable screen (non-invoice
-  classes refused, reason recorded), and an injection screen
+  classes refused, reason recorded), an injection screen
   that fences instruction-like text out of the copy of a
-  document that travels onward to any engine.
+  document that travels onward to any engine, and the door: a
+  payable document whose supplier is not on the master at
+  all stops in `NEW_SUPPLIER_REVIEW` before any screen runs
+  (the new-supplier hold, below).
 - **The gate** — matched records stop mid-pipeline at a
   LangGraph interrupt, checkpointed in Postgres, until a named
   approver approves or rejects with a reason. Fraud-held and
@@ -801,6 +804,81 @@ screen). The demo's closing act stages the legitimate case: Cedarline's
 recorded change, one September invoice quoting the old bank and clean,
 one October invoice quoting the same old bank and held SUPERSEDED.
 
+## Unknown suppliers stop at the door
+
+Every judgement in this system keys off the supplier master — the
+match reads its orders, the fraud screen reads its bank details, the
+ledger joins on its identity. A document whose supplier the master
+does not carry used to have no governed fate: its name failed the
+intake's exact match, no referenced purchase order resolved it, the
+fraud screen silently compared against nothing, and the record
+washed up as a generic match exception. But a first payee is the
+highest-risk arrival in AP — it is the document with no history to
+disagree with — so it now stops at the door, in its own named state:
+
+- **The stop is exact, and total.** A payable document (invoice or
+  credit note) whose supplier resolves *neither* by the name it
+  states — matched exactly against the master, never by resemblance
+  — *nor* by the purchase order it references lands in
+  `NEW_SUPPLIER_REVIEW`. It has **not been matched** and **has not
+  been fraud-screened** — there is no master record to screen
+  against, and the record says so instead of wearing a clean screen
+  it never had. It is **not a payable**: the gate cannot decide it
+  (409, naming the door), a payment run refuses it by name
+  (`NEW_SUPPLIER_HOLD`), and the AP position discloses the held
+  money beside its tie, outside it, under the name exactly as the
+  document wrote it.
+- **The near-miss is evidence, never a join.** When the stated name
+  stands within two edits of a master name, the hold names that
+  supplier — the commonest case is a misspelling of a governed
+  supplier, and the governed answer to a misspelling is a refusal
+  that says so, not a second payee wearing a typo. Held documents
+  group on the review queue (`GET /new-suppliers`, `new-suppliers`
+  on the CLI, the console's door section) by the identity they
+  stated, under the intake's own normalisation — a group is exactly
+  what one enrolment resolves.
+- **Enrolment is a bank-details recording, and carries that
+  governance whole.** A named controller enrols the identity
+  (`POST /records/{id}/enrol`, `enrol-supplier` on the CLI) with
+  the bank account and the source the details were verified *from*
+  — no actor, no source, or no account → refused by name, before
+  anything is written. The act creates **exactly one** master
+  record (standing suppliers and their bank histories stand
+  byte-identical), its details standing as version 1 — the seed's
+  own shape, undated, with the enrolment's provenance where the
+  seed carries the deployment's. The id is the next free `SUP-<n>`,
+  or one the controller states — the buyer's ERP often assigned
+  the vendor number when it raised the supplier's first purchase
+  order, and the orders on file name that id. Enrolling then
+  **releases every held record of the identity** back through the
+  pipeline's own adjudication: screened, watched, and matched
+  exactly as if the master had carried the supplier when it
+  arrived. Enrolment launders nothing — a released invoice whose
+  stated details differ from the enrolled ones lands on
+  `FRAUD_REVIEW` by the ordinary rule.
+- **Refusal is per record, reasoned, and terminal.** A controller
+  may instead refuse a held document (`POST
+  /records/{id}/refuse-new-supplier`, `refuse-new-supplier` on the
+  CLI) with a stated reason: the record is `REFUSED` with
+  `NOT_A_KNOWN_SUPPLIER` as its refusal reason, retained read-only,
+  and nothing is enrolled by it. Per record, deliberately — one bad
+  document does not condemn an identity's other paperwork, which
+  stays held for its own decision. Both acts ride the record
+  permanently beside the hold that stopped it.
+- **Storage follows the master's own home.** Enrolment writes
+  reference data — the same in-memory surface the master has
+  always lived behind, in both store implementations — so there is
+  no migration: the ladder covers the records the pipeline writes,
+  and the master is not one of them. In a customer deployment the
+  same seam is the ERP's vendor onboarding.
+
+The seeded world's suppliers are all on the master, so the demo
+flow is untouched; the demo stages the door explicitly — the
+Harborlight misspelling held with its near-miss named and refused
+as a misspelling, then a genuinely new supplier enrolled and
+released to earn its own (PO-less) match fate. The eval pack
+stages the full arc on its own planted service.
+
 ## Configuration
 
 Provider-first: the standard run is Reducto. Copy `.env.example`
@@ -963,6 +1041,20 @@ gates on it:
   recording; the ledger must show the version in force at
   its as-of and a released run must pay the version in force
   on release day.
+- **New-supplier hold** — on a planted service (an order
+  raised for a supplier AP never enrolled): the first invoice
+  must stop at the door in `NEW_SUPPLIER_REVIEW`, unmatched
+  and unscreened, with its held companions grouped as one
+  identity; the gate's refusal must name the door; an
+  enrolment without its provenance must be refused and write
+  nothing; enrolment under the order's own id must release
+  both held records through the pipeline's adjudication —
+  the honest one running clean to approval, the one whose
+  stated details differ from the enrolled ones landing on
+  `FRAUD_REVIEW`; a later arrival from the enrolled supplier
+  must be ordinary; and a second unknown's document must be
+  refused terminally as `NOT_A_KNOWN_SUPPLIER`, the master
+  having gained exactly the one enrolled supplier.
 
 Live-Reducto eval runs are opt-in (`EVAL_LIVE=1` with a key)
 and reported, not gated.
@@ -985,6 +1077,7 @@ src/reducto_ap_agent/
   position.py      the AP position at close: ageing + the tie-out, in code
   coverage.py      PO coverage: cumulative billed per order, against its total
   bankmaster.py    the master's bank versions: effective-dated, provenance-stamped
+  enrolment.py     the new-supplier door: the hold, the near-miss, the review queue
   ledger.py        the supplier ledger: one supplier, the whole relationship
   duplicates.py    the paid-duplicate watch: arrivals vs paid history, in code
   guardrails.py    bank-detail, payable, and injection screens

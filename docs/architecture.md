@@ -115,9 +115,12 @@ intake → process → gate (interrupt) → apply
   advice likewise has its paid lines captured, because
   confirmation (below) reads them; payable documents are
   extracted, screened (bank details), matched, and checked
-  for duplicates against live records. Terminal states from
-  this node: `RECEIVED`, `REFUSED`, `FRAUD_REVIEW`,
-  `EXCEPTION`, or `AWAITING_APPROVER`.
+  for duplicates against live records — unless the supplier
+  resolves to no master record, in which case the document
+  stops at the door (the new-supplier hold, below) before any
+  of that runs. Terminal states from this node: `RECEIVED`,
+  `REFUSED`, `FRAUD_REVIEW`, `PAID_DUPLICATE_HOLD`,
+  `NEW_SUPPLIER_REVIEW`, `EXCEPTION`, or `AWAITING_APPROVER`.
 - **gate** — an interrupt listing the submission's awaiting
   records. The graph parks here, checkpointed. The service
   resumes it only when every awaiting record of the submission
@@ -1211,6 +1214,115 @@ retroactive re-screening of held records when a version
 lands: a fraud hold is resolved in the master out of band and
 by a fresh submission, as it always was — the history makes
 the *next* screen right, it does not rewrite the last one.
+
+## The new-supplier door
+
+The intake resolves a payable document's supplier two ways —
+the stated name, matched exactly against the master under its
+normalisation (strip, lower-case), or the supplier of the
+purchase order it references. Both failing used to be a
+shrug: the fraud screen compared against nothing and returned
+no flags, the match failed on the missing order, and the
+record stood at a generic EXCEPTION. The judgements this
+system makes are master-keyed, so an unresolvable document
+was the one arrival no governance touched — while being, as
+a first payee, the arrival governance exists for. It now
+stops in the pipeline, before the screen, in
+`NEW_SUPPLIER_REVIEW` (`enrolment.py` owns the evidence and
+the queue; `graph.py` owns the stop; `service.py` owns the
+two acts).
+
+**The hold is unstamped by design.** A held record carries
+`match = None`, `fraud_flags = []`, `bank_account_seen =
+None` — not as gaps but as the truth: no match was computed
+and no screen ran, and the audit entry says both in words.
+What the record does carry is a `SupplierHold`: the name as
+written, its normalised form, and a near-miss — the master
+supplier within two edits of the stated name (the worklist's
+Levenshtein arithmetic), named as evidence and computed once,
+at intake, under the stamped-at-intake discipline the fraud
+screen set. The near-miss is the misspelling case made
+legible: the controller can see that "Harbor Light Marine
+Supply" is Harborlight wearing a space, and refuse it as
+exactly that, instead of the system either attaching it by
+resemblance (a silent join) or enrolling it (a second payee
+for one company — the fraud pattern with paperwork).
+
+**The exits are asymmetric, deliberately.** Enrolment is an
+identity act: it creates the master record for the group —
+every held record that stated the identity under the intake's
+own normalisation — and releases all of them. It is also a
+bank-details recording, so its validation is
+`record_bank_version`'s, mirrored by name: actor, account,
+and the source the details were verified from, all checked
+before the master write, so a failed enrolment writes
+nothing and a half-enrolment cannot exist. The version it
+creates is a version 1 in the seed's shape (undated — the
+standing word from before the record), differing from a
+deployment seed only in carrying the enrolment's provenance
+instead of the seed's. The id defaults to the next free
+`SUP-<n>` and accepts a stated id, because the order register
+already names suppliers AP has not enrolled — the ERP raised
+the purchase order first — and enrolling under the order's
+id is what lets the released invoice match the order that was
+always on file. Refusal is a document act: per record,
+reasoned, terminal (`NOT_A_KNOWN_SUPPLIER`), enrolling
+nothing — because a group can hold one genuine document and
+one forgery under the same stated name, and the forgery's
+refusal must not condemn the genuine paper, nor the genuine
+paper's enrolment bless the forgery (which is then screened,
+on release, against details it does not match — and lands on
+FRAUD_REVIEW).
+
+**Release is a re-run, not a shortcut.** The pipeline's
+adjudication — screen, paid-duplicate watch, duplicate check,
+match, status — is factored once (`_adjudicate`), called by
+intake for fresh documents and by the enrolment path
+(`readjudicate`) for released ones, under the enrolled
+supplier. A released record therefore carries no mark of
+leniency: its audit shows the hold, the enrolment, and then
+the ordinary events its contents earn, in order. This is the
+same factoring the gate needed in round 8 (`apply_gate_decision`)
+— one implementation, so a judgement lands the same way by
+either path.
+
+**Visibility without payability.** Held money is not owed
+money, and the surfaces keep the two apart the way they
+already did for fraud-held money: the packet, runs, and
+position totals read APPROVED records only; the position
+additionally discloses new-supplier-held lines (name as
+written, face, open) beside its tie with their own totals,
+and the CSV carries the section; the ledger index counts the
+door's subset of its unmatched section (`new_supplier_hold_count`),
+the unmatched list itself being where these records already
+stood — now with a status that names why. A payment run asked
+for a held record refuses it by name (`NEW_SUPPLIER_HOLD`),
+before the generic not-approved, in the check order the
+refusals already keep.
+
+**Storage: no migration, by the same precedent.** Enrolment
+writes reference data — one supplier row and one version-1
+entry behind the reference store's surface, exactly where
+`record_bank_version` appends. The migration ladder covers
+what the pipeline writes; the master is loaded, not written,
+and its two governed exceptions (append a version, enrol a
+supplier) both live at that seam. In a deployment whose ERP
+owns the master, enrolment is the ERP's vendor-onboarding act
+and this surface is where its result lands.
+
+Deliberately not built: no fuzzy auto-attach at any threshold
+— the near-miss informs a human and joins nothing. No
+enrolment from the document's own stated bank details: the
+details a controller enrols are the ones they state from
+out-of-band verification, which may differ from the
+document's — and when they do, the released document is a
+fraud case, which is the system working. No provisional or
+probationary payee state: a supplier is on the master or it
+is not, and a payment run never has to ask which kind. No
+door for statements and attachments: a statement from an
+unknown name is already refused by the payment path and named
+in reconciliation's own refusal when it cannot be reconciled;
+the door governs payables, where the money risk is.
 
 ## Data services
 
