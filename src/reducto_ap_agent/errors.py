@@ -85,6 +85,19 @@ class CreditError(ApError):
     status_code = 422
 
 
+class MasterError(ApError):
+    """A supplier-master recording was asked of something that
+    cannot be recorded — a bank version with no provenance (no
+    actor, or nothing it was recorded from), no effective date,
+    an effective date that does not move the master's history
+    forward, or details identical to the version they would
+    supersede. The master is governed reference data: a change
+    to it that cannot say who made it, from what evidence, and
+    from when it holds is not a change, it is a rumour."""
+
+    status_code = 422
+
+
 class CoverageError(ApError):
     """PO coverage was asked of something it cannot speak for
     — a record that is not an invoice, or an invoice naming no

@@ -207,9 +207,19 @@ class ApPipeline:
             record.supplier_name = supplier.name
 
         # Fraud screen — before the match outcome means anything.
+        # The master is versioned, so the comparison is as of the
+        # invoice's own date: the account it should name is the one
+        # in force when it was issued (bankmaster.py).
         seen_bank = extraction.value("bank_account")
         record.bank_account_seen = str(seen_bank) if seen_bank else None
-        record.fraud_flags = guardrails.screen_bank_details(record.bank_account_seen, supplier)
+        record.fraud_flags = guardrails.screen_bank_details(
+            record.bank_account_seen, supplier,
+            versions=(
+                ref.bank_versions_for(supplier.supplier_id)
+                if supplier is not None else None
+            ),
+            invoice_date=str(extraction.value("invoice_date") or ""),
+        )
 
         receipt = ref.receipts_by_po.get(po.po_number) if po else None
         result = match_invoice(extraction, po, receipt, policy=self.policy)

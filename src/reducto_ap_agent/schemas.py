@@ -135,6 +135,54 @@ class Supplier(BaseModel):
     currency: str = "USD"
 
 
+class BankVersion(BaseModel):
+    """One version of a supplier's bank details on the master
+    (bankmaster.py): the details, the date they take effect,
+    and the provenance of the recording — who recorded them,
+    when, and what they were recorded FROM. Bank details are
+    verified out of band; this record is the evidence that the
+    verification happened, and it is append-only: a later
+    version never rewrites an earlier one, so what the master
+    said on any past date stays sayable.
+
+    Version 1 is the seed — the details the deployment loaded
+    the master with. It carries no ``effective_from`` (""),
+    because it predates the record: it is effective for every
+    date before the first dated version supersedes it. Every
+    recorded version names its effective date, and effective
+    dates are monotonic per supplier — a version takes effect
+    after every version already on file — so the version in
+    force on a date is never ambiguous."""
+
+    version: int  # 1-based, per supplier, in recording order
+    bank_account: str
+    bank_name: str = ""
+    effective_from: str = ""  # ISO date; "" only on the seed
+    recorded_by: str = ""
+    recorded_at: str = ""  # ISO timestamp (UTC) of the recording
+    source: str = ""  # what the details were recorded from
+
+
+class BankHistory(BaseModel):
+    """One supplier's bank timeline (bankmaster.py): every
+    version on file in recording order, and the version in
+    force at ``as_of`` named as ``current_version`` — the one
+    the ledger shows and a payment released at that date would
+    pay. A read model: building it writes nothing."""
+
+    supplier_id: str
+    supplier_name: str
+    as_of: str
+    versions: list[BankVersion] = Field(default_factory=list)
+    current_version: int = 1
+    note: str = (
+        "Versions are append-only and effective-dated: the "
+        "fraud screen judges an invoice against the version in "
+        "force on the invoice's own date, and history is never "
+        "rewritten by a later recording."
+    )
+
+
 class LineMatch(BaseModel):
     sku: str
     verdict: Literal["matched", "price_variance", "quantity_variance", "missing"]
@@ -833,6 +881,14 @@ class LedgerBank(BaseModel):
 
     bank_name: str = ""
     bank_account: str = ""  # the master's approved account
+    # The bank version in force at the ledger's as-of (the
+    # version whose details are shown above), and how many
+    # versions the master holds for this supplier in total —
+    # the count is the signal that the details have a past;
+    # the timeline itself is served by the bank-history read.
+    bank_version: int = 1
+    bank_version_count: int = 1
+    effective_from: str = ""  # the shown version's; "" = the seed
     warning: str | None = None
     flags: list[str] = Field(default_factory=list)
     flagged_record_ids: list[str] = Field(default_factory=list)

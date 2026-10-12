@@ -25,8 +25,10 @@ from __future__ import annotations
 import json
 import threading
 
+from .bankmaster import seed_version
 from .db import database_url, ensure_migrated
 from .schemas import (
+    BankVersion,
     DocumentRecord,
     GoodsReceipt,
     PaymentConfirmation,
@@ -38,19 +40,30 @@ from .schemas import (
 
 
 class ReferenceData:
-    """Suppliers, POs, receipts — read-only for the pipeline."""
+    """Suppliers, POs, receipts — read-only for the pipeline.
+
+    One governed exception to the reading: a supplier's bank
+    versions (bankmaster.py). The master itself is reference
+    data, so its history lives here too — seeded with version
+    1 per supplier at load, and extended only by the service's
+    named recording act, which appends. Nothing anywhere
+    edits or removes a version once it stands."""
 
     def __init__(self) -> None:
         self.suppliers: dict[str, Supplier] = {}
         self.suppliers_by_name: dict[str, Supplier] = {}
         self.purchase_orders: dict[str, PurchaseOrder] = {}
         self.receipts_by_po: dict[str, GoodsReceipt] = {}
+        self.bank_versions: dict[str, list[BankVersion]] = {}
 
     def load(self, suppliers: list[Supplier], pos: list[PurchaseOrder],
              receipts: list[GoodsReceipt]) -> None:
         for supplier in suppliers:
             self.suppliers[supplier.supplier_id] = supplier
             self.suppliers_by_name[supplier.name.strip().lower()] = supplier
+            self.bank_versions[supplier.supplier_id] = [
+                seed_version(supplier)
+            ]
         for po in pos:
             self.purchase_orders[po.po_number] = po
         for receipt in receipts:
@@ -60,6 +73,21 @@ class ReferenceData:
         if not name:
             return None
         return self.suppliers_by_name.get(name.strip().lower())
+
+    def bank_versions_for(self, supplier_id: str) -> list[BankVersion]:
+        """The supplier's bank versions in recording order —
+        the stored list itself for known suppliers (callers
+        read it; only ``record_bank_version`` appends), empty
+        for an id the master does not carry."""
+        return self.bank_versions.get(supplier_id, [])
+
+    def record_bank_version(
+        self, supplier_id: str, version: BankVersion
+    ) -> BankVersion:
+        """Append one recorded version to a supplier's series.
+        Append is the only write the series ever takes."""
+        self.bank_versions[supplier_id].append(version)
+        return version
 
 
 class InMemoryRecordStore:
