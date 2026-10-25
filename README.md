@@ -49,7 +49,9 @@ AI against Reducto's public API documentation to show how a
 forward-deployed team would put the Reducto platform into
 production inside an enterprise finance operation.
 
-> **Work in progress** — this blueprint is built and passing its automated test and eval gates, but it has not yet finished hands-on local testing, and its companion blog post is not yet published. Expect changes. This notice comes off when both are done.
+<p><a href="https://trida.ai/blog/invoice-document-processing-agent-blueprint"><img src="https://geeytzpdwvjojoie.public.blob.vercel-storage.com/blog/1792755873330-cover.webp" alt="Invoice Document Processing Agent Blueprint" width="600"></a></p>
+
+**Deep-dive:** [Invoice Document Processing Agent Blueprint](https://trida.ai/blog/invoice-document-processing-agent-blueprint) — how the agent works, where it stops, and what the evals actually prove.
 
 ---
 
